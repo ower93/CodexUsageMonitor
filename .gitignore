@@ -1,0 +1,6 @@
+.build/
+dist/
+work/
+.DS_Store
+outputs/CodexUsageMonitor.app/
+outputs/* 2.*
