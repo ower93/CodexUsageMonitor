@@ -25,6 +25,11 @@ let package = Package(
             name: "PreviewRendererTool",
             dependencies: ["CodexUsageUI"],
             path: "Sources/PreviewRendererTool"
+        ),
+        .testTarget(
+            name: "CodexUsageUITests",
+            dependencies: ["CodexUsageUI"],
+            path: "Tests/CodexUsageUITests"
         )
     ]
 )

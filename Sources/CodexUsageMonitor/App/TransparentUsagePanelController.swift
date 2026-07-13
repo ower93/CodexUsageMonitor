@@ -91,13 +91,34 @@ final class TransparentUsagePanelController {
         blurView.alphaValue = tuning.backgroundBlurPercent / 100
         rootView.addSubview(blurView)
 
-        let hostingView = NSHostingView(rootView: UsagePanelView(store: store, tuning: tuning))
+        let hostingView = NSHostingView(
+            rootView: UsagePanelView(
+                store: store,
+                tuning: tuning,
+                onHeightChange: { [weak self] height in
+                    self?.resizePanel(to: height)
+                }
+            )
+        )
         hostingView.frame = NSRect(x: 0, y: 0, width: Layout.width, height: Layout.height)
         hostingView.autoresizingMask = [.width, .height]
         hostingView.wantsLayer = true
         hostingView.layer?.backgroundColor = NSColor.clear.cgColor
         rootView.addSubview(hostingView)
         panel.contentView = rootView
+    }
+
+    private func resizePanel(to height: CGFloat) {
+        let height = min(UsagePanelMetrics.height, max(135, height.rounded()))
+        guard abs(panel.frame.height - height) > 0.5 else { return }
+
+        var frame = panel.frame
+        if panel.isVisible {
+            frame.origin.y += frame.height - height
+        }
+        frame.size.height = height
+        panel.setFrame(frame, display: panel.isVisible, animate: panel.isVisible)
+        panel.invalidateShadow()
     }
 
     private func show() {
@@ -134,7 +155,7 @@ final class TransparentUsagePanelController {
         x = max(visibleFrame.minX + Layout.screenMargin, x)
         x = min(visibleFrame.maxX - Layout.width - Layout.screenMargin, x)
 
-        var y = buttonFrameOnScreen.minY - Layout.height - Layout.statusBarGap
+        var y = buttonFrameOnScreen.minY - panel.frame.height - Layout.statusBarGap
         if y < visibleFrame.minY + Layout.screenMargin {
             y = buttonFrameOnScreen.maxY + Layout.statusBarGap
         }

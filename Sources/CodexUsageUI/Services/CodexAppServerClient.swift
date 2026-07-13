@@ -116,6 +116,7 @@ struct CodexAppServerClient: Sendable {
                 totalTokens: SessionTokenReader.latestTotalTokens(at: thread.path)
             )
         }
+        let apiCostEstimate = SessionAPICostEstimator.estimate()
 
         return CodexLiveUsage(
             rateLimits: CodexRateLimitSnapshot(
@@ -128,7 +129,8 @@ struct CodexAppServerClient: Sendable {
             dailyUsage: (accountUsage.dailyUsageBuckets ?? []).map {
                 CodexDailyUsage(startDate: $0.startDate, tokens: $0.tokens)
             },
-            recentThreads: threads
+            recentThreads: threads,
+            apiCostEstimate: apiCostEstimate
         )
     }
 

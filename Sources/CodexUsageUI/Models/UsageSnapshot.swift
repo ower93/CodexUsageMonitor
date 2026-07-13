@@ -21,11 +21,19 @@ struct RecentTask: Identifiable, Codable, Sendable {
     let progress: Double
 }
 
+struct APICostEstimateSnapshot: Codable, Sendable {
+    let sevenDayUSD: Double
+    let lifetimeUSD: Double
+    let coveragePercent: Int
+    let modelNames: [String]
+}
+
 struct UsageSnapshot: Codable, Sendable {
     var planLabel: String
     var periods: [UsagePeriod]
     var metrics: [UsageMetric]
     var recentTasks: [RecentTask]
+    var apiCostEstimate: APICostEstimateSnapshot?
     var availableResets: Int
     var updatedAt: Date
 
@@ -73,6 +81,12 @@ struct UsageSnapshot: Codable, Sendable {
                 progress: 0.35
             )
         ],
+        apiCostEstimate: APICostEstimateSnapshot(
+            sevenDayUSD: 186.42,
+            lifetimeUSD: 1_980,
+            coveragePercent: 94,
+            modelNames: ["GPT-5.5", "GPT-5.6 Sol"]
+        ),
         availableResets: 2,
         updatedAt: Date()
     )

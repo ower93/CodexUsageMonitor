@@ -2,7 +2,26 @@ import SwiftUI
 
 public enum UsagePanelMetrics {
     public static let width: CGFloat = 370
-    public static let height: CGFloat = 646
+    public static let height: CGFloat = 776
+    public static let settingsMinimumHeight: CGFloat = 376
+
+    public static func preferredHeight(
+        showUsageSummary: Bool,
+        showRecentTasks: Bool,
+        showAPICost: Bool
+    ) -> CGFloat {
+        var result: CGFloat = 135
+        if showUsageSummary {
+            result += 271
+        }
+        if showRecentTasks {
+            result += 223
+        }
+        if showAPICost {
+            result += 147
+        }
+        return result
+    }
 }
 
 enum UsageDesign {

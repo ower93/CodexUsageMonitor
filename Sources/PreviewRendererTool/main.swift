@@ -11,6 +11,7 @@ struct PreviewRendererTool {
 
         let outputPath = CommandLine.arguments.dropFirst().first
             ?? "work/codex-usage-panel-preview.png"
+        let showsSettings = CommandLine.arguments.dropFirst().contains("--settings")
         let store = UsageStore(autoRefresh: false, previewOnly: true)
         let tuning = GlassTuning.final
         let content = ZStack {
@@ -22,7 +23,12 @@ struct PreviewRendererTool {
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
-            UsagePanelView(store: store, tuning: tuning)
+            UsagePanelView(
+                store: store,
+                tuning: tuning,
+                preferencesEnabled: false,
+                settingsInitiallyPresented: showsSettings
+            )
         }
         .frame(width: UsagePanelMetrics.width, height: UsagePanelMetrics.height)
         let renderer = ImageRenderer(content: content)
