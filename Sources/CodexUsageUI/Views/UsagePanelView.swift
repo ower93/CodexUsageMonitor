@@ -56,15 +56,19 @@ public struct UsagePanelView: View {
         VStack(spacing: 12) {
             HeaderView(store: store, tuning: tuning, isShowingSettings: $isShowingSettings)
             if showUsageSummary {
-                UsageSummaryCard(snapshot: store.snapshot, tuning: tuning)
+                UsageSummaryCard(snapshot: store.snapshot, language: store.language, tuning: tuning)
             }
             if showRecentTasks {
-                RecentTasksCard(tasks: store.snapshot.recentTasks, tuning: tuning)
+                RecentTasksCard(tasks: store.snapshot.recentTasks, language: store.language, tuning: tuning)
             }
             if showAPICost {
-                APICostEstimateCard(estimate: store.snapshot.apiCostEstimate, tuning: tuning)
+                APICostEstimateCard(
+                    estimate: store.snapshot.apiCostEstimate,
+                    language: store.language,
+                    tuning: tuning
+                )
             }
-            FooterView(snapshot: store.snapshot)
+            FooterView(snapshot: store.snapshot, language: store.language)
         }
         .padding(.horizontal, 16)
         .padding(.top, 14)
@@ -97,6 +101,10 @@ public struct UsagePanelView: View {
                     showUsageSummary: $storedShowUsageSummary,
                     showRecentTasks: $storedShowRecentTasks,
                     showAPICost: $storedShowAPICost,
+                    language: Binding(
+                        get: { store.language },
+                        set: { store.setLanguage($0) }
+                    ),
                     tuning: tuning,
                     close: { isShowingSettings = false }
                 )
@@ -126,6 +134,7 @@ public struct UsagePanelView: View {
 
 private struct APICostEstimateCard: View {
     let estimate: APICostEstimateSnapshot?
+    let language: AppLanguage
     let tuning: GlassTuning
 
     private var sevenDayValue: String {
@@ -139,7 +148,7 @@ private struct APICostEstimateCard: View {
     }
 
     private var modelText: String {
-        guard let names = estimate?.modelNames, !names.isEmpty else { return "暂无公开 API 定价模型" }
+        guard let names = estimate?.modelNames, !names.isEmpty else { return language.noPricedModel }
         return names.joined(separator: " · ")
     }
 
@@ -148,31 +157,31 @@ private struct APICostEstimateCard: View {
             HStack(spacing: 7) {
                 Image(systemName: "dollarsign.circle")
                     .font(.system(size: 15, weight: .semibold))
-                Text("已消耗 token 价值（估算）")
-                    .font(UsageDesign.font(15, weight: .bold))
+                Text(language.apiCostTitle)
+                    .font(UsageDesign.font(15, weight: .bold, language: language))
                 Spacer()
-                Text("API 标准价")
-                    .font(UsageDesign.font(10.5, weight: .medium))
+                Text(language.standardAPIRates)
+                    .font(UsageDesign.font(10.5, weight: .medium, language: language))
                     .foregroundStyle(.secondary)
             }
 
             HStack(alignment: .firstTextBaseline) {
                 Text(sevenDayValue)
-                    .font(UsageDesign.font(25, weight: .bold))
+                    .font(UsageDesign.font(25, weight: .bold, language: language))
                     .foregroundStyle(UsageDesign.blue)
                     .monospacedDigit()
-                Text("近 7 天")
-                    .font(UsageDesign.font(11.5, weight: .medium))
+                Text(language.metricSevenDays)
+                    .font(UsageDesign.font(11.5, weight: .medium, language: language))
                     .foregroundStyle(.secondary)
 
                 Spacer()
 
                 VStack(alignment: .trailing, spacing: 2) {
                     Text(lifetimeValue)
-                        .font(UsageDesign.font(15, weight: .bold))
+                        .font(UsageDesign.font(15, weight: .bold, language: language))
                         .monospacedDigit()
-                    Text("生涯总费用")
-                        .font(UsageDesign.font(10.5))
+                    Text(language.lifetimeCost)
+                        .font(UsageDesign.font(10.5, language: language))
                         .foregroundStyle(.secondary)
                 }
             }
@@ -186,16 +195,17 @@ private struct APICostEstimateCard: View {
                 Text(modelText)
                     .lineLimit(1)
                 Spacer(minLength: 8)
-                Text("可计价 \(estimate?.coveragePercent ?? 0)%")
+                Text(language.pricedCoverage(estimate?.coveragePercent ?? 0))
                     .monospacedDigit()
             }
-            .font(UsageDesign.font(10.5, weight: .medium))
+            .font(UsageDesign.font(10.5, weight: .medium, language: language))
             .foregroundStyle(.secondary)
 
-            Text("按输入 / 缓存输入 / 输出 token 分别估算，不含税费与长上下文加价")
-                .font(UsageDesign.font(9.5))
+            Text(language.costDisclaimer)
+                .font(UsageDesign.font(9.5, language: language))
                 .foregroundStyle(.tertiary)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .lineLimit(2)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
@@ -231,10 +241,11 @@ private struct HeaderView: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline, spacing: 9) {
-                    Text("Codex 用量")
-                        .font(UsageDesign.font(20, weight: .bold))
+                    Text(store.language.appTitle)
+                        .font(UsageDesign.font(20, weight: .bold, language: store.language))
+                        .lineLimit(1)
                     Text(store.snapshot.planLabel)
-                        .font(UsageDesign.font(11, weight: .bold))
+                        .font(UsageDesign.font(11, weight: .bold, language: store.language))
                         .tracking(1.0)
                         .foregroundStyle(.secondary)
                 }
@@ -244,8 +255,10 @@ private struct HeaderView: View {
                         .fill(store.lastError == nil ? UsageDesign.green : Color.orange)
                         .frame(width: 8, height: 8)
                     Text(store.statusText)
-                        .font(UsageDesign.font(13))
+                        .font(UsageDesign.font(13, language: store.language))
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.78)
                 }
             }
 
@@ -270,8 +283,8 @@ private struct HeaderView: View {
                     }
                 }
                 .buttonStyle(.plain)
-                .help("刷新用量")
-                .accessibilityHint(store.lastError ?? "从 Codex 账户刷新真实用量")
+                .help(store.language.refreshUsage)
+                .accessibilityHint(store.lastError ?? store.language.refreshFromAccountHint)
 
                 Button {
                     isShowingSettings.toggle()
@@ -286,8 +299,8 @@ private struct HeaderView: View {
                     }
                 }
                 .buttonStyle(.plain)
-                .help("显示设置")
-                .accessibilityLabel("显示设置")
+                .help(store.language.showSettings)
+                .accessibilityLabel(store.language.showSettings)
             }
         }
         .padding(.horizontal, 14)
@@ -298,13 +311,14 @@ private struct HeaderView: View {
 
 private struct UsageSummaryCard: View {
     let snapshot: UsageSnapshot
+    let language: AppLanguage
     let tuning: GlassTuning
 
     var body: some View {
         VStack(spacing: 0) {
             VStack(spacing: 0) {
                 ForEach(Array(snapshot.periods.enumerated()), id: \.element.id) { index, period in
-                    QuotaRow(period: period)
+                    QuotaRow(period: period, language: language)
                     if index < snapshot.periods.count - 1 {
                         Divider()
                             .opacity(0.32)
@@ -320,10 +334,10 @@ private struct UsageSummaryCard: View {
                 ForEach(snapshot.metrics) { metric in
                     VStack(spacing: 4) {
                         Text(metric.value)
-                            .font(UsageDesign.font(19, weight: .bold))
+                            .font(UsageDesign.font(19, weight: .bold, language: language))
                             .monospacedDigit()
                         Text(metric.label)
-                            .font(UsageDesign.font(12, weight: .medium))
+                            .font(UsageDesign.font(12, weight: .medium, language: language))
                             .foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity)
@@ -337,15 +351,16 @@ private struct UsageSummaryCard: View {
 
 private struct QuotaRow: View {
     let period: UsagePeriod
+    let language: AppLanguage
 
     var body: some View {
         VStack(spacing: 10) {
             HStack(alignment: .firstTextBaseline) {
                 Text(period.title)
-                    .font(UsageDesign.font(16, weight: .bold))
+                    .font(UsageDesign.font(16, weight: .bold, language: language))
                 Spacer()
                 Text("\(period.remainingPercent)%")
-                    .font(UsageDesign.font(20, weight: .bold))
+                    .font(UsageDesign.font(20, weight: .bold, language: language))
                     .foregroundStyle(UsageDesign.blue)
                     .monospacedDigit()
             }
@@ -362,11 +377,11 @@ private struct QuotaRow: View {
             .frame(height: 10)
 
             HStack {
-                Text("剩余")
+                Text(language.remaining)
                 Spacer()
                 Text(period.resetText)
             }
-            .font(UsageDesign.font(11.5))
+            .font(UsageDesign.font(11.5, language: language))
             .foregroundStyle(.secondary)
         }
         .padding(.horizontal, 14)
@@ -376,6 +391,7 @@ private struct QuotaRow: View {
 
 private struct RecentTasksCard: View {
     let tasks: [RecentTask]
+    let language: AppLanguage
     let tuning: GlassTuning
 
     var body: some View {
@@ -383,11 +399,11 @@ private struct RecentTasksCard: View {
             HStack {
                 Image(systemName: "list.bullet.rectangle")
                     .font(.system(size: 15, weight: .semibold))
-                Text("最近任务")
-                    .font(UsageDesign.font(15, weight: .bold))
+                Text(language.recentTasks)
+                    .font(UsageDesign.font(15, weight: .bold, language: language))
                 Spacer()
-                Text("线程累计 token")
-                    .font(UsageDesign.font(11))
+                Text(language.threadTotalTokens)
+                    .font(UsageDesign.font(11, language: language))
                     .foregroundStyle(.secondary)
             }
             .padding(.horizontal, 14)
@@ -395,7 +411,7 @@ private struct RecentTasksCard: View {
             .padding(.bottom, 9)
 
             ForEach(Array(tasks.enumerated()), id: \.element.id) { index, task in
-                RecentTaskRow(task: task)
+                RecentTaskRow(task: task, language: language)
                 if index < tasks.count - 1 {
                     Divider()
                         .opacity(0.30)
@@ -409,21 +425,22 @@ private struct RecentTasksCard: View {
 
 private struct RecentTaskRow: View {
     let task: RecentTask
+    let language: AppLanguage
 
     var body: some View {
         VStack(spacing: 7) {
             HStack(alignment: .center, spacing: 10) {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(task.title)
-                        .font(UsageDesign.font(14, weight: .bold))
+                        .font(UsageDesign.font(14, weight: .bold, language: language))
                         .lineLimit(1)
                     Text(task.time)
-                        .font(UsageDesign.font(10.5))
+                        .font(UsageDesign.font(10.5, language: language))
                         .foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 8)
                 Text(task.tokenText)
-                    .font(UsageDesign.font(14.5, weight: .bold))
+                    .font(UsageDesign.font(14.5, weight: .bold, language: language))
                     .foregroundStyle(UsageDesign.blue)
                     .monospacedDigit()
             }
@@ -448,6 +465,7 @@ private struct RecentTaskRow: View {
 
 private struct FooterView: View {
     let snapshot: UsageSnapshot
+    let language: AppLanguage
 
     private var updatedTime: String {
         let components = Calendar.current.dateComponents([.hour, .minute], from: snapshot.updatedAt)
@@ -456,16 +474,16 @@ private struct FooterView: View {
 
     var body: some View {
         HStack {
-            Label("可用重置 \(snapshot.availableResets) 次", systemImage: "clock.arrow.circlepath")
+            Label(language.availableResets(snapshot.availableResets), systemImage: "clock.arrow.circlepath")
             Spacer()
-            Text("更新于 \(updatedTime)")
+            Text(language.updatedAt(updatedTime))
         }
-        .font(UsageDesign.font(11.5, weight: .medium))
+        .font(UsageDesign.font(11.5, weight: .medium, language: language))
         .foregroundStyle(.secondary)
         .padding(.horizontal, 4)
         .frame(height: 24)
         .contextMenu {
-            Button("退出 Codex 用量") {
+            Button(language.quitApplication) {
                 NSApplication.shared.terminate(nil)
             }
         }

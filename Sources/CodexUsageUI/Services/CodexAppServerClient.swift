@@ -161,7 +161,7 @@ struct CodexAppServerClient: Sendable {
     }
 }
 
-private enum CodexUsageClientError: LocalizedError {
+enum CodexUsageClientError: LocalizedError {
     case executableNotFound
     case launchFailed
     case server(String)
@@ -169,17 +169,29 @@ private enum CodexUsageClientError: LocalizedError {
     case missingAccountUsage
 
     var errorDescription: String? {
+        description(language: .systemMatch())
+    }
+
+    func description(language: AppLanguage) -> String {
         switch self {
         case .executableNotFound:
-            "未找到 Codex 应用"
+            language == .simplifiedChinese ? "未找到 Codex 应用" : "Codex app not found"
         case .launchFailed:
-            "无法启动 Codex 用量服务"
+            language == .simplifiedChinese
+                ? "无法启动 Codex 用量服务"
+                : "Unable to start the Codex usage service"
         case .server(let message):
-            "Codex 返回错误：\(message)"
+            language == .simplifiedChinese
+                ? "Codex 返回错误：\(message)"
+                : "Codex returned an error: \(message)"
         case .missingRateLimits:
-            "未读取到 Codex 限额"
+            language == .simplifiedChinese
+                ? "未读取到 Codex 限额"
+                : "Codex usage limits were not returned"
         case .missingAccountUsage:
-            "未读取到账户 token 用量"
+            language == .simplifiedChinese
+                ? "未读取到账户 token 用量"
+                : "Account token usage was not returned"
         }
     }
 }

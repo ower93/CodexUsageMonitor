@@ -3,7 +3,7 @@ import SwiftUI
 public enum UsagePanelMetrics {
     public static let width: CGFloat = 370
     public static let height: CGFloat = 776
-    public static let settingsMinimumHeight: CGFloat = 376
+    public static let settingsMinimumHeight: CGFloat = 430
 
     public static func preferredHeight(
         showUsageSummary: Bool,
@@ -28,7 +28,14 @@ enum UsageDesign {
     static let blue = Color(red: 0.0, green: 0.43, blue: 0.94)
     static let green = Color(red: 0.05, green: 0.72, blue: 0.34)
 
-    static func font(_ size: CGFloat, weight: Font.Weight = .regular) -> Font {
+    static func font(
+        _ size: CGFloat,
+        weight: Font.Weight = .regular,
+        language: AppLanguage = .simplifiedChinese
+    ) -> Font {
+        if language == .english {
+            return .system(size: size, weight: weight, design: .rounded)
+        }
         let fontName = weight == .regular
             ? "STHeitiSC-Light"
             : "STHeitiSC-Medium"

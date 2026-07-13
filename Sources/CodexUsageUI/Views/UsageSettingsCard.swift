@@ -4,6 +4,7 @@ struct UsageSettingsCard: View {
     @Binding var showUsageSummary: Bool
     @Binding var showRecentTasks: Bool
     @Binding var showAPICost: Bool
+    @Binding var language: AppLanguage
     let tuning: GlassTuning
     let close: () -> Void
 
@@ -15,16 +16,16 @@ struct UsageSettingsCard: View {
             HStack(spacing: 7) {
                 Image(systemName: "gearshape.fill")
                     .foregroundStyle(UsageDesign.blue)
-                Text("显示设置")
-                    .font(UsageDesign.font(15, weight: .bold))
+                Text(language.settingsTitle)
+                    .font(UsageDesign.font(15, weight: .bold, language: language))
                 Spacer()
-                Button("全部显示") {
+                Button(language.showAll) {
                     showUsageSummary = true
                     showRecentTasks = true
                     showAPICost = true
                 }
                 .buttonStyle(.plain)
-                .font(UsageDesign.font(10.5, weight: .medium))
+                .font(UsageDesign.font(10.5, weight: .medium, language: language))
                 .foregroundStyle(UsageDesign.blue)
 
                 Button(action: close) {
@@ -34,27 +35,30 @@ struct UsageSettingsCard: View {
                         .background(Circle().fill(Color.secondary.opacity(0.10)))
                 }
                 .buttonStyle(.plain)
-                .help("关闭设置")
+                .help(language.closeSettings)
             }
 
             VStack(alignment: .leading, spacing: 8) {
-                Text("显示卡片")
-                    .font(UsageDesign.font(10.5, weight: .medium))
+                Text(language.cardsSection)
+                    .font(UsageDesign.font(10.5, weight: .medium, language: language))
                     .foregroundStyle(.secondary)
 
                 SettingsToggleRow(
-                    title: "额度与 Token 概览",
+                    title: language.usageSummaryCard,
                     systemImage: "gauge.with.dots.needle.67percent",
+                    language: language,
                     isOn: $showUsageSummary
                 )
                 SettingsToggleRow(
-                    title: "最近任务",
+                    title: language.recentTasks,
                     systemImage: "list.bullet.rectangle",
+                    language: language,
                     isOn: $showRecentTasks
                 )
                 SettingsToggleRow(
-                    title: "Token 价值估算",
+                    title: language.costCard,
                     systemImage: "dollarsign.circle",
+                    language: language,
                     isOn: $showAPICost
                 )
             }
@@ -63,33 +67,36 @@ struct UsageSettingsCard: View {
                 .opacity(0.35)
 
             VStack(alignment: .leading, spacing: 7) {
-                Text("通用")
-                    .font(UsageDesign.font(10.5, weight: .medium))
+                Text(language.generalSection)
+                    .font(UsageDesign.font(10.5, weight: .medium, language: language))
                     .foregroundStyle(.secondary)
 
+                LanguageSettingRow(language: $language)
+
                 SettingsToggleRow(
-                    title: "开机时启动",
+                    title: language.launchAtLogin,
                     systemImage: "power",
+                    language: language,
                     isOn: launchAtLoginBinding
                 )
 
                 if launchAtLoginState == .requiresApproval {
                     HStack(spacing: 6) {
-                        Text("需要在系统设置中允许")
+                        Text(language.approvalRequired)
                         Spacer()
-                        Button("前往设置") {
+                        Button(language.openSettings) {
                             LaunchAtLoginService.openSystemSettings()
                         }
                         .buttonStyle(.plain)
                         .foregroundStyle(UsageDesign.blue)
                     }
-                    .font(UsageDesign.font(9.5, weight: .medium))
+                    .font(UsageDesign.font(9.5, weight: .medium, language: language))
                     .foregroundStyle(.secondary)
                 }
 
                 if let launchAtLoginError {
                     Text(launchAtLoginError)
-                        .font(UsageDesign.font(9.5))
+                        .font(UsageDesign.font(9.5, language: language))
                         .foregroundStyle(.red)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -121,7 +128,7 @@ struct UsageSettingsCard: View {
                     launchAtLoginError = nil
                 } catch {
                     launchAtLoginState = LaunchAtLoginService.state
-                    launchAtLoginError = "设置失败：\(error.localizedDescription)"
+                    launchAtLoginError = language.settingsFailure(error.localizedDescription)
                 }
             }
         )
@@ -131,6 +138,7 @@ struct UsageSettingsCard: View {
 private struct SettingsToggleRow: View {
     let title: String
     let systemImage: String
+    let language: AppLanguage
     @Binding var isOn: Bool
 
     var body: some View {
@@ -139,7 +147,7 @@ private struct SettingsToggleRow: View {
         } label: {
             HStack(spacing: 8) {
                 Label(title, systemImage: systemImage)
-                    .font(UsageDesign.font(12.5, weight: .medium))
+                    .font(UsageDesign.font(12.5, weight: .medium, language: language))
                 Spacer()
                 ZStack {
                     Capsule()
@@ -156,7 +164,40 @@ private struct SettingsToggleRow: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(title)
-        .accessibilityValue(isOn ? "已开启" : "已关闭")
+        .accessibilityValue(
+            isOn ? language.enabledAccessibilityValue : language.disabledAccessibilityValue
+        )
         .animation(.easeInOut(duration: 0.16), value: isOn)
+    }
+}
+
+private struct LanguageSettingRow: View {
+    @Binding var language: AppLanguage
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Label(language.languageSetting, systemImage: "globe")
+                .font(UsageDesign.font(12.5, weight: .medium, language: language))
+            Spacer(minLength: 6)
+            HStack(spacing: 3) {
+                ForEach(AppLanguage.allCases) { option in
+                    Button {
+                        language = option
+                    } label: {
+                        Text(option.displayName)
+                            .font(UsageDesign.font(9.5, weight: .medium, language: option))
+                            .foregroundStyle(language == option ? Color.white : Color.secondary)
+                            .padding(.horizontal, 7)
+                            .frame(height: 22)
+                            .background {
+                                Capsule()
+                                    .fill(language == option ? UsageDesign.blue : Color.secondary.opacity(0.10))
+                            }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(language == option ? .isSelected : [])
+                }
+            }
+        }
     }
 }

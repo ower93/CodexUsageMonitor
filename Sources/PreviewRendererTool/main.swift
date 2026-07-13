@@ -9,10 +9,12 @@ struct PreviewRendererTool {
     static func main() async throws {
         _ = NSApplication.shared
 
-        let outputPath = CommandLine.arguments.dropFirst().first
+        let arguments = Array(CommandLine.arguments.dropFirst())
+        let outputPath = arguments.first(where: { !$0.hasPrefix("--") })
             ?? "work/codex-usage-panel-preview.png"
-        let showsSettings = CommandLine.arguments.dropFirst().contains("--settings")
-        let store = UsageStore(autoRefresh: false, previewOnly: true)
+        let showsSettings = arguments.contains("--settings")
+        let language: AppLanguage = arguments.contains("--english") ? .english : .simplifiedChinese
+        let store = UsageStore(autoRefresh: false, previewOnly: true, language: language)
         let tuning = GlassTuning.final
         let content = ZStack {
             LinearGradient(
