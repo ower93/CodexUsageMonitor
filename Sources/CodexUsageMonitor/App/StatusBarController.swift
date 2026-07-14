@@ -36,7 +36,7 @@ final class StatusBarController: NSObject {
         guard let button = statusItem.button else { return }
         let image = NSImage(
             systemSymbolName: "gauge.with.dots.needle.67percent",
-            accessibilityDescription: "Codex 用量"
+            accessibilityDescription: store.language.appTitle
         )
         image?.isTemplate = true
         button.image = image
@@ -45,7 +45,7 @@ final class StatusBarController: NSObject {
         button.target = self
         button.action = #selector(handleStatusItemAction)
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
-        button.toolTip = "Codex 用量"
+        button.toolTip = store.language.appTitle
     }
 
     private func observeUsageChanges() {
@@ -58,7 +58,10 @@ final class StatusBarController: NSObject {
 
     private func updateStatusButton() {
         statusItem.button?.title = " \(store.menuPercent)%"
-        statusItem.button?.setAccessibilityLabel("Codex 剩余额度 \(store.menuPercent)%")
+        statusItem.button?.toolTip = store.language.appTitle
+        statusItem.button?.setAccessibilityLabel(
+            store.language.remainingAccessibilityLabel(percent: store.menuPercent)
+        )
     }
 
     @objc
@@ -72,11 +75,19 @@ final class StatusBarController: NSObject {
 
     private func showContextMenu() {
         let menu = NSMenu()
-        let refresh = NSMenuItem(title: "刷新用量", action: #selector(refreshUsage), keyEquivalent: "r")
+        let refresh = NSMenuItem(
+            title: store.language.refreshUsage,
+            action: #selector(refreshUsage),
+            keyEquivalent: "r"
+        )
         refresh.target = self
         menu.addItem(refresh)
         menu.addItem(.separator())
-        let quit = NSMenuItem(title: "退出 Codex 用量", action: #selector(quitApplication), keyEquivalent: "q")
+        let quit = NSMenuItem(
+            title: store.language.quitApplication,
+            action: #selector(quitApplication),
+            keyEquivalent: "q"
+        )
         quit.target = self
         menu.addItem(quit)
         statusItem.menu = menu

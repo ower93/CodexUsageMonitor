@@ -8,17 +8,21 @@ MIN_SYSTEM_VERSION="14.0"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
-SDK_PATH="/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk"
-SWIFT_BIN="/Library/Developer/CommandLineTools/usr/bin/swift"
-CACHE_DIR="$ROOT_DIR/work/build-cache"
+SDK_PATH="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"
+SWIFT_BIN="$(/usr/bin/xcrun --find swift)"
+CACHE_DIR="$ROOT_DIR/work/xcode-build-cache"
 BUILD_DIR="$CACHE_DIR/build"
-APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
+STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/CodexUsageMonitor.XXXXXX")"
+APP_BUNDLE="$STAGING_DIR/$APP_NAME.app"
+FINAL_APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 APP_CONTENTS="$APP_BUNDLE/Contents"
 APP_MACOS="$APP_CONTENTS/MacOS"
 APP_RESOURCES="$APP_CONTENTS/Resources"
 APP_BINARY="$APP_MACOS/$APP_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
 APP_ICON_SOURCE="$ROOT_DIR/Assets/AppIcon.icns"
+
+trap 'rm -rf "$STAGING_DIR"' EXIT
 
 pkill -x "$APP_NAME" >/dev/null 2>&1 || true
 
@@ -62,8 +66,13 @@ cat >"$INFO_PLIST" <<PLIST
 </plist>
 PLIST
 
+/usr/bin/xattr -cr "$APP_BUNDLE"
+/usr/bin/codesign --force --deep --sign - "$APP_BUNDLE"
+/usr/bin/ditto "$APP_BUNDLE" "$FINAL_APP_BUNDLE"
+/usr/bin/codesign --verify --deep "$FINAL_APP_BUNDLE"
+
 open_app() {
-  /usr/bin/open -n "$APP_BUNDLE"
+  /usr/bin/open -n "$FINAL_APP_BUNDLE"
 }
 
 case "$MODE" in

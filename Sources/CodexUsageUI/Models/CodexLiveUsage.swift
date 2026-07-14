@@ -6,6 +6,15 @@ struct CodexLiveUsage: Sendable {
     let lifetimeTokens: Int64?
     let dailyUsage: [CodexDailyUsage]
     let recentThreads: [CodexThreadUsage]
+    let apiCostEstimate: CodexAPICostEstimate?
+}
+
+struct CodexAPICostEstimate: Sendable {
+    let sevenDayUSD: Double
+    let lifetimeUSD: Double
+    let pricedTokens: Int64
+    let observedTokens: Int64
+    let modelNames: [String]
 }
 
 struct CodexRateLimitSnapshot: Sendable {
@@ -33,30 +42,15 @@ struct CodexThreadUsage: Sendable {
 }
 
 extension UsageSnapshot {
-    init(live: CodexLiveUsage, now: Date = Date()) {
+    init(live: CodexLiveUsage, language: AppLanguage, now: Date = Date()) {
         let windows = [live.rateLimits.primary, live.rateLimits.secondary].compactMap { $0 }
         let periods = windows.enumerated().map { index, window in
-            let duration = window.windowDurationMinutes
-            let title: String
-            switch duration {
-            case 300:
-                title = "5 小时额度"
-            case 10_080:
-                title = "7 天额度"
-            case .some(let minutes) where minutes % 1_440 == 0:
-                title = "\(minutes / 1_440) 天额度"
-            case .some(let minutes) where minutes % 60 == 0:
-                title = "\(minutes / 60) 小时额度"
-            default:
-                title = index == 0 ? "短期限额" : "长期限额"
-            }
-
             let remaining = max(0, min(100, Int((100 - window.usedPercent).rounded())))
             return UsagePeriod(
                 id: index == 0 ? "primary" : "secondary",
-                title: title,
+                title: language.quotaTitle(durationMinutes: window.windowDurationMinutes, index: index),
                 remainingPercent: remaining,
-                resetText: Self.resetDescription(for: window.resetsAt, now: now)
+                resetText: language.resetDescription(for: window.resetsAt, now: now)
             )
         }
 
@@ -75,9 +69,9 @@ extension UsageSnapshot {
 
         let firstThreadTokens = live.recentThreads.first?.totalTokens
         let metrics = [
-            UsageMetric(id: "current", value: Self.formatTokens(firstThreadTokens), label: "最新线程"),
-            UsageMetric(id: "week", value: Self.formatTokens(sevenDayTokens), label: "近 7 天"),
-            UsageMetric(id: "total", value: Self.formatTokens(live.lifetimeTokens), label: "累计")
+            UsageMetric(id: "current", value: Self.formatTokens(firstThreadTokens), label: language.metricCurrent),
+            UsageMetric(id: "week", value: Self.formatTokens(sevenDayTokens), label: language.metricSevenDays),
+            UsageMetric(id: "total", value: Self.formatTokens(live.lifetimeTokens), label: language.metricLifetime)
         ]
 
         let maximumThreadTokens = live.recentThreads.compactMap(\.totalTokens).max() ?? 0
@@ -91,7 +85,7 @@ extension UsageSnapshot {
             return RecentTask(
                 id: thread.id,
                 title: thread.title,
-                time: Self.timeFormatter.string(from: thread.updatedAt),
+                time: Self.timeString(from: thread.updatedAt, language: language),
                 tokenText: Self.formatTokens(thread.totalTokens),
                 progress: progress
             )
@@ -102,6 +96,16 @@ extension UsageSnapshot {
             periods: periods,
             metrics: metrics,
             recentTasks: recentTasks,
+            apiCostEstimate: live.apiCostEstimate.map { estimate in
+                APICostEstimateSnapshot(
+                    sevenDayUSD: estimate.sevenDayUSD,
+                    lifetimeUSD: estimate.lifetimeUSD,
+                    coveragePercent: estimate.observedTokens > 0
+                        ? Int((Double(estimate.pricedTokens) / Double(estimate.observedTokens) * 100).rounded())
+                        : 0,
+                    modelNames: estimate.modelNames
+                )
+            },
             availableResets: live.availableResetCount,
             updatedAt: now
         )
@@ -119,20 +123,6 @@ extension UsageSnapshot {
         }
     }
 
-    private static func resetDescription(for date: Date?, now: Date) -> String {
-        guard let date else { return "重置时间未知" }
-        let interval = max(0, date.timeIntervalSince(now))
-        let relative: String
-        if interval < 3_600 {
-            relative = "\(max(1, Int(ceil(interval / 60)))) 分钟后"
-        } else if interval < 86_400 {
-            relative = "\(max(1, Int(interval / 3_600))) 小时后"
-        } else {
-            relative = "\(max(1, Int(interval / 86_400))) 天后"
-        }
-        return "重置 \(relative) (\(dateFormatter.string(from: date)))"
-    }
-
     private static func formatTokens(_ tokens: Int64?) -> String {
         guard let tokens else { return "—" }
         let value = Double(tokens)
@@ -148,17 +138,10 @@ extension UsageSnapshot {
         return String(tokens)
     }
 
-    private static let dateFormatter: DateFormatter = {
+    private static func timeString(from date: Date, language: AppLanguage) -> String {
         let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_CN")
-        formatter.dateFormat = "M月d日 HH:mm"
-        return formatter
-    }()
-
-    private static let timeFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.locale = language.locale
         formatter.dateFormat = "HH:mm"
-        return formatter
-    }()
+        return formatter.string(from: date)
+    }
 }
