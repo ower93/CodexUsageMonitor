@@ -34,7 +34,7 @@ enum UsageDesign {
         language: AppLanguage = .simplifiedChinese
     ) -> Font {
         if language == .english {
-            return .system(size: size, weight: weight, design: .rounded)
+            return .system(size: size, weight: .regular, design: .rounded)
         }
         let fontName = weight == .regular
             ? "STHeitiSC-Light"

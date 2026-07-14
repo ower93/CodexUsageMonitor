@@ -2,37 +2,61 @@ import Foundation
 
 enum SessionAPICostEstimator {
     private static let cache = SessionSummaryCache()
+    private static let ledgerLock = NSLock()
 
-    static func estimate(now: Date = Date()) -> CodexAPICostEstimate? {
+    static func estimate(
+        now: Date = Date(),
+        ledgerURL: URL = APICostLedgerStore.defaultURL
+    ) -> CodexAPICostEstimate? {
         let codexRoot = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".codex", isDirectory: true)
         let sessionRoot = codexRoot.appendingPathComponent("sessions", isDirectory: true)
         let archivedRoot = codexRoot.appendingPathComponent("archived_sessions", isDirectory: true)
-        let sevenDayFiles = sessionFilesForLastSevenDays(in: sessionRoot, now: now)
-        let sevenDayPaths = Set(sevenDayFiles.map(\.path))
         let allFiles = allSessionFiles(in: [sessionRoot, archivedRoot])
+        let calendar = Calendar.current
 
-        var sevenDay = CostAccumulator()
-        var lifetime = CostAccumulator()
+        var observations: [SessionFileObservation] = []
         for fileURL in allFiles {
-            guard let summary = cache.summary(for: fileURL) else { continue }
-            lifetime.add(summary)
-            if sevenDayPaths.contains(fileURL.path) {
-                sevenDay.add(summary)
-            }
+            guard let cached = cache.observation(for: fileURL) else { continue }
+            observations.append(SessionFileObservation(
+                sessionID: fileURL.lastPathComponent,
+                summary: cached.summary,
+                initialUsageDay: initialUsageDay(
+                    for: fileURL,
+                    modifiedAt: cached.modifiedAt,
+                    calendar: calendar
+                ),
+                incrementalUsageDay: usageDay(for: cached.modifiedAt, calendar: calendar)
+            ))
         }
 
-        guard lifetime.observedTokens > 0 else { return nil }
-        return CodexAPICostEstimate(
-            sevenDayUSD: sevenDay.usd,
-            lifetimeUSD: lifetime.usd,
-            pricedTokens: lifetime.pricedTokens,
-            observedTokens: lifetime.observedTokens,
-            modelNames: lifetime.modelTokenTotals
-                .sorted { $0.value > $1.value }
-                .prefix(2)
-                .map(\.key)
-        )
+        ledgerLock.lock()
+        defer { ledgerLock.unlock() }
+
+        do {
+            let store = APICostLedgerStore(url: ledgerURL)
+            var ledger = try store.load()
+            var didChange = false
+            for observation in observations {
+                if ledger.observe(
+                    sessionID: observation.sessionID,
+                    summary: observation.summary,
+                    initialUsageDay: observation.initialUsageDay,
+                    incrementalUsageDay: observation.incrementalUsageDay,
+                    price: APIModelPrice.price(for: observation.summary.model)
+                ) {
+                    didChange = true
+                }
+            }
+            if didChange {
+                try store.save(ledger)
+            }
+            return ledger.estimate(sevenDayKeys: sevenDayKeys(now: now, calendar: calendar))
+        } catch {
+            // Do not recreate or reprice history when the durable ledger cannot
+            // be read or written. The rest of the usage panel can still refresh.
+            return nil
+        }
     }
 
     static func estimatedUSD(
@@ -42,13 +66,24 @@ enum SessionAPICostEstimator {
         outputTokens: Int64
     ) -> Double? {
         guard let price = APIModelPrice.price(for: model) else { return nil }
-        let cachedInput = min(max(0, cachedInputTokens), max(0, inputTokens))
-        let uncachedInput = max(0, inputTokens - cachedInput)
-        let output = max(0, outputTokens)
+        return estimatedUSD(
+            price: price,
+            counts: TokenCounts(
+                inputTokens: inputTokens,
+                cachedInputTokens: cachedInputTokens,
+                outputTokens: outputTokens,
+                totalTokens: max(0, inputTokens) + max(0, outputTokens)
+            )
+        )
+    }
+
+    static func estimatedUSD(price: APIModelPrice, counts: TokenCounts) -> Double {
+        let cachedInput = min(counts.cachedInputTokens, counts.inputTokens)
+        let uncachedInput = max(0, counts.inputTokens - cachedInput)
 
         return Double(uncachedInput) / 1_000_000 * price.inputPerMillion
             + Double(cachedInput) / 1_000_000 * price.cachedInputPerMillion
-            + Double(output) / 1_000_000 * price.outputPerMillion
+            + Double(counts.outputTokens) / 1_000_000 * price.outputPerMillion
     }
 
     private static func allSessionFiles(in roots: [URL]) -> [URL] {
@@ -71,120 +106,94 @@ enum SessionAPICostEstimator {
         return Array(filesByName.values)
     }
 
-    private static func sessionFilesForLastSevenDays(in root: URL, now: Date) -> [URL] {
-        let calendar = Calendar.current
-        let fileManager = FileManager.default
-        var files: [URL] = []
+    private static func sevenDayKeys(now: Date, calendar: Calendar) -> Set<String> {
+        let startOfToday = calendar.startOfDay(for: now)
+        return Set((0..<7).compactMap { dayOffset in
+            calendar.date(byAdding: .day, value: -dayOffset, to: startOfToday).map {
+                usageDay(for: $0, calendar: calendar)
+            }
+        })
+    }
 
-        for dayOffset in 0..<7 {
-            guard let date = calendar.date(byAdding: .day, value: -dayOffset, to: now) else { continue }
-            let components = calendar.dateComponents([.year, .month, .day], from: date)
-            guard let year = components.year, let month = components.month, let day = components.day else { continue }
-            let directory = root
-                .appendingPathComponent(String(format: "%04d", year), isDirectory: true)
-                .appendingPathComponent(String(format: "%02d", month), isDirectory: true)
-                .appendingPathComponent(String(format: "%02d", day), isDirectory: true)
-
-            guard let contents = try? fileManager.contentsOfDirectory(
-                at: directory,
-                includingPropertiesForKeys: [.isRegularFileKey],
-                options: [.skipsHiddenFiles]
-            ) else { continue }
-            files.append(contentsOf: contents.filter { $0.pathExtension == "jsonl" })
+    private static func initialUsageDay(
+        for fileURL: URL,
+        modifiedAt: Date,
+        calendar: Calendar
+    ) -> String {
+        let pathComponents = fileURL.pathComponents
+        if let sessionsIndex = pathComponents.lastIndex(of: "sessions"),
+           sessionsIndex + 3 < pathComponents.count,
+           let year = Int(pathComponents[sessionsIndex + 1]),
+           let month = Int(pathComponents[sessionsIndex + 2]),
+           let day = Int(pathComponents[sessionsIndex + 3]),
+           let result = validUsageDay(year: year, month: month, day: day, calendar: calendar) {
+            return result
         }
-        return files
+
+        let fileName = fileURL.deletingPathExtension().lastPathComponent
+        if let range = fileName.range(
+            of: #"[0-9]{4}-[0-9]{2}-[0-9]{2}"#,
+            options: .regularExpression
+        ) {
+            let components = fileName[range].split(separator: "-").compactMap { Int($0) }
+            if components.count == 3,
+               let result = validUsageDay(
+                   year: components[0],
+                   month: components[1],
+                   day: components[2],
+                   calendar: calendar
+               ) {
+                return result
+            }
+        }
+
+        return usageDay(for: modifiedAt, calendar: calendar)
+    }
+
+    private static func validUsageDay(
+        year: Int,
+        month: Int,
+        day: Int,
+        calendar: Calendar
+    ) -> String? {
+        var components = DateComponents()
+        components.calendar = calendar
+        components.year = year
+        components.month = month
+        components.day = day
+        guard let date = calendar.date(from: components) else { return nil }
+        let validated = calendar.dateComponents([.year, .month, .day], from: date)
+        guard validated.year == year, validated.month == month, validated.day == day else {
+            return nil
+        }
+        return String(format: "%04d-%02d-%02d", year, month, day)
+    }
+
+    private static func usageDay(for date: Date, calendar: Calendar) -> String {
+        let components = calendar.dateComponents([.year, .month, .day], from: date)
+        return String(
+            format: "%04d-%02d-%02d",
+            components.year ?? 0,
+            components.month ?? 0,
+            components.day ?? 0
+        )
     }
 }
 
-private struct CostAccumulator {
-    private(set) var usd = 0.0
-    private(set) var pricedTokens: Int64 = 0
-    private(set) var observedTokens: Int64 = 0
-    private(set) var modelTokenTotals: [String: Int64] = [:]
-
-    mutating func add(_ summary: SessionTokenSummary) {
-        observedTokens += summary.totalTokens
-        guard
-            let price = APIModelPrice.price(for: summary.model),
-            let sessionUSD = SessionAPICostEstimator.estimatedUSD(
-                model: summary.model,
-                inputTokens: summary.inputTokens,
-                cachedInputTokens: summary.cachedInputTokens,
-                outputTokens: summary.outputTokens
-            )
-        else { return }
-
-        usd += sessionUSD
-        pricedTokens += summary.totalTokens
-        modelTokenTotals[price.displayName, default: 0] += summary.totalTokens
-    }
-}
-
-private struct APIModelPrice {
-    let displayName: String
-    let inputPerMillion: Double
-    let cachedInputPerMillion: Double
-    let outputPerMillion: Double
-
-    // Official standard API list prices as of 2026-07-13.
-    // https://developers.openai.com/api/docs/models/compare
-    // https://developers.openai.com/api/docs/models/gpt-5.6-sol
-    static func price(for rawModel: String) -> APIModelPrice? {
-        let model = rawModel.lowercased()
-        if model == "gpt-5.6-sol" || model.hasPrefix("gpt-5.6-sol-") {
-            return APIModelPrice(
-                displayName: "GPT-5.6 Sol",
-                inputPerMillion: 5,
-                cachedInputPerMillion: 0.5,
-                outputPerMillion: 30
-            )
-        }
-        if model == "gpt-5.6-terra" || model.hasPrefix("gpt-5.6-terra-") {
-            return APIModelPrice(
-                displayName: "GPT-5.6 Terra",
-                inputPerMillion: 2.5,
-                cachedInputPerMillion: 0.25,
-                outputPerMillion: 15
-            )
-        }
-        if model == "gpt-5.6-luna" || model.hasPrefix("gpt-5.6-luna-") {
-            return APIModelPrice(
-                displayName: "GPT-5.6 Luna",
-                inputPerMillion: 1,
-                cachedInputPerMillion: 0.1,
-                outputPerMillion: 6
-            )
-        }
-        if model == "gpt-5.5" || model.hasPrefix("gpt-5.5-") {
-            return APIModelPrice(
-                displayName: "GPT-5.5",
-                inputPerMillion: 5,
-                cachedInputPerMillion: 0.5,
-                outputPerMillion: 30
-            )
-        }
-        if model == "gpt-5.4" || model.hasPrefix("gpt-5.4-") {
-            return APIModelPrice(
-                displayName: "GPT-5.4",
-                inputPerMillion: 2.5,
-                cachedInputPerMillion: 0.25,
-                outputPerMillion: 15
-            )
-        }
-        return nil
-    }
-}
-
-private struct SessionTokenSummary: Sendable {
-    let model: String
-    let inputTokens: Int64
-    let cachedInputTokens: Int64
-    let outputTokens: Int64
-    let totalTokens: Int64
+private struct SessionFileObservation {
+    let sessionID: String
+    let summary: SessionTokenSummary
+    let initialUsageDay: String
+    let incrementalUsageDay: String
 }
 
 private struct FileSignature: Equatable {
     let size: Int
+    let modifiedAt: Date
+}
+
+private struct CachedSessionSummary {
+    let summary: SessionTokenSummary
     let modifiedAt: Date
 }
 
@@ -197,7 +206,7 @@ private final class SessionSummaryCache: @unchecked Sendable {
     private let lock = NSLock()
     private var entries: [String: Entry] = [:]
 
-    func summary(for url: URL) -> SessionTokenSummary? {
+    func observation(for url: URL) -> CachedSessionSummary? {
         guard let signature = signature(for: url) else { return nil }
         let path = url.path
 
@@ -205,14 +214,18 @@ private final class SessionSummaryCache: @unchecked Sendable {
         let cached = entries[path]
         lock.unlock()
         if cached?.signature == signature {
-            return cached?.summary
+            return cached?.summary.map {
+                CachedSessionSummary(summary: $0, modifiedAt: signature.modifiedAt)
+            }
         }
 
         let parsed = SessionSummaryReader.read(from: url, fileSize: signature.size)
         lock.lock()
         entries[path] = Entry(signature: signature, summary: parsed)
         lock.unlock()
-        return parsed
+        return parsed.map {
+            CachedSessionSummary(summary: $0, modifiedAt: signature.modifiedAt)
+        }
     }
 
     private func signature(for url: URL) -> FileSignature? {

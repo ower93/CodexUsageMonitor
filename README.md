@@ -23,7 +23,7 @@
 
 - 实时显示 5 小时与每周 Codex 剩余额度和重置时间。
 - 显示最近线程、当前线程、近 7 天及累计 token。
-- 按模型的公开 API 标准价估算近 7 天与本机可见生涯 token 价值，普通输入、缓存输入和输出分别计价。
+- 按模型的公开 API 标准价估算近 7 天与本机可见生涯 token 价值，普通输入、缓存输入和输出分别计价，并为历史用量冻结当时的价格快照。
 - 通过右上角设置按钮选择显示的卡片，并可启用登录时自动启动。
 - 支持中文与英文；首次启动匹配 macOS 首选语言，之后可在设置中随时切换并记住选择。
 - 复用 Codex Desktop 登录状态，无需额外填写 API Key。
@@ -52,7 +52,7 @@
 - `account/usage/read`：近 7 天和账户累计 token。
 - `thread/list`：最近更新的真实线程；每个线程的累计 token 从对应会话的最新 `token_count` 事件读取。
 
-API 等值费用会扫描本机 `~/.codex/sessions` 与 `~/.codex/archived_sessions` 中可见的会话日志，根据每个会话的模型，将普通输入、缓存输入和输出 token 按不同价格估算。该金额不是实际账单，且不包含税费与长上下文加价。
+API 等值费用会扫描本机 `~/.codex/sessions` 与 `~/.codex/archived_sessions` 中可见的会话日志，根据每个会话的模型，将普通输入、缓存输入和输出 token 按不同价格估算。计价账本保存在 `~/Library/Application Support/CodexUsageMonitor/token-cost-ledger.json`；每次只按当时价格记录新增 token，未来 API 调价不会重新计算已有历史。首次使用账本的版本会以当时价格为现有本地日志建立基线。该金额不是实际账单，且不包含税费与长上下文加价。
 
 应用启动时自动刷新，面板打开期间每 60 秒刷新一次，也可以点击右上角按钮手动刷新。
 
@@ -66,7 +66,7 @@ It uses a native `NSStatusItem` menu bar entry and a transparent, borderless cus
 
 - Live 5-hour and weekly Codex limits, remaining percentages, and reset times.
 - Latest thread, last 7 days, and lifetime token totals.
-- Estimated API-equivalent value based on public model pricing, with regular input, cached input, and output tokens priced separately.
+- Estimated API-equivalent value based on public model pricing, with regular input, cached input, and output tokens priced separately and historical price snapshots preserved.
 - Card visibility controls and an optional Launch at Login setting.
 - Chinese and English interfaces. The first launch follows the preferred macOS language; later manual selections are remembered.
 - Reuses the existing Codex Desktop login session—no separate API key is required.
@@ -95,7 +95,7 @@ The app talks to the local `app-server` bundled with Codex and reuses the curren
 - `account/usage/read`: last-7-days and account lifetime token usage.
 - `thread/list`: recently updated threads, with per-thread totals read from the latest `token_count` event in each session.
 
-The API-equivalent estimate scans locally visible sessions under `~/.codex/sessions` and `~/.codex/archived_sessions`. It is an estimate—not a bill—and excludes taxes and long-context surcharges.
+The API-equivalent estimate scans locally visible sessions under `~/.codex/sessions` and `~/.codex/archived_sessions`. Its ledger is stored at `~/Library/Application Support/CodexUsageMonitor/token-cost-ledger.json`. Only newly observed tokens are charged at the current recorded price, so later API price changes do not reprice existing history. The first ledger-enabled launch creates a baseline from the existing local logs at the then-current price. It is an estimate—not a bill—and excludes taxes and long-context surcharges.
 
 The app refreshes on launch, every 60 seconds while the panel is open, and whenever the refresh button is clicked.
 
