@@ -34,7 +34,7 @@ struct CodexAppServerClient: Sendable {
                     "clientInfo": [
                         "name": "codex-usage-monitor",
                         "title": "Codex Usage Monitor",
-                        "version": "1.0.0"
+                        "version": "1.2"
                     ],
                     "capabilities": [
                         "experimentalApi": true,

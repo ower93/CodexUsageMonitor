@@ -14,21 +14,7 @@ enum SessionAPICostEstimator {
         let archivedRoot = codexRoot.appendingPathComponent("archived_sessions", isDirectory: true)
         let allFiles = allSessionFiles(in: [sessionRoot, archivedRoot])
         let calendar = Calendar.current
-
-        var observations: [SessionFileObservation] = []
-        for fileURL in allFiles {
-            guard let cached = cache.observation(for: fileURL) else { continue }
-            observations.append(SessionFileObservation(
-                sessionID: fileURL.lastPathComponent,
-                summary: cached.summary,
-                initialUsageDay: initialUsageDay(
-                    for: fileURL,
-                    modifiedAt: cached.modifiedAt,
-                    calendar: calendar
-                ),
-                incrementalUsageDay: usageDay(for: cached.modifiedAt, calendar: calendar)
-            ))
-        }
+        let descriptors = allFiles.map(SessionUsageLogReader.descriptor(for:))
 
         ledgerLock.lock()
         defer { ledgerLock.unlock() }
@@ -37,13 +23,82 @@ enum SessionAPICostEstimator {
             let store = APICostLedgerStore(url: ledgerURL)
             var ledger = try store.load()
             var didChange = false
-            for observation in observations {
+
+            if ledger.requiresRebuild {
+                try store.backupLegacyLedger(schemaVersion: ledger.schemaVersion)
+                ledger = APICostLedger()
+                didChange = true
+            }
+
+            var inheritedBaselines: [String: TokenCounts] = [:]
+            for descriptor in descriptors {
+                if let baseline = ledger.checkpoints[descriptor.sessionID]?.inheritedBaseline {
+                    inheritedBaselines[descriptor.sessionID] = baseline
+                }
+            }
+
+            let unresolvedForkIDs = Set(descriptors.compactMap { descriptor in
+                descriptor.parentSessionID != nil
+                    && inheritedBaselines[descriptor.sessionID] == nil
+                    ? descriptor.sessionID
+                    : nil
+            })
+            if !unresolvedForkIDs.isEmpty {
+                inheritedBaselines.merge(
+                    SessionUsageLogReader.inheritedBaselines(
+                        for: descriptors,
+                        childSessionIDs: unresolvedForkIDs
+                    ),
+                    uniquingKeysWith: { saved, _ in saved }
+                )
+            }
+
+            for descriptor in descriptors {
+                let inheritedBaseline: TokenCounts
+                if descriptor.parentSessionID != nil {
+                    // A fork without a resolvable parent snapshot must remain
+                    // unpriced; billing its copied parent history would inflate
+                    // the account lifetime estimate.
+                    guard let resolved = inheritedBaselines[descriptor.sessionID] else {
+                        continue
+                    }
+                    inheritedBaseline = resolved
+                } else {
+                    inheritedBaseline = .zero
+                }
+
+                if ledger.checkpoints[descriptor.sessionID] == nil {
+                    guard let history = SessionUsageLogReader.history(
+                        for: descriptor,
+                        inheritedBaseline: inheritedBaseline
+                    ) else { continue }
+                    ledger.replaceHistory(
+                        sessionID: descriptor.sessionID,
+                        history: history,
+                        inheritedBaseline: descriptor.parentSessionID == nil
+                            ? nil
+                            : inheritedBaseline
+                    )
+                    didChange = true
+                    continue
+                }
+
+                guard let cached = cache.observation(for: descriptor.url),
+                      let adjustedSummary = cached.summary.subtracting(inheritedBaseline)
+                else { continue }
                 if ledger.observe(
-                    sessionID: observation.sessionID,
-                    summary: observation.summary,
-                    initialUsageDay: observation.initialUsageDay,
-                    incrementalUsageDay: observation.incrementalUsageDay,
-                    price: APIModelPrice.price(for: observation.summary.model)
+                    sessionID: descriptor.sessionID,
+                    summary: adjustedSummary,
+                    initialUsageDay: initialUsageDay(
+                        for: descriptor.url,
+                        modifiedAt: cached.modifiedAt,
+                        calendar: calendar
+                    ),
+                    incrementalUsageDay: usageDay(for: cached.modifiedAt, calendar: calendar),
+                    price: APIModelPrice.price(for: adjustedSummary.model),
+                    inheritedBaseline: descriptor.parentSessionID == nil
+                        ? nil
+                        : inheritedBaseline
                 ) {
                     didChange = true
                 }
@@ -180,11 +235,19 @@ enum SessionAPICostEstimator {
     }
 }
 
-private struct SessionFileObservation {
-    let sessionID: String
-    let summary: SessionTokenSummary
-    let initialUsageDay: String
-    let incrementalUsageDay: String
+private extension SessionTokenSummary {
+    func subtracting(_ baseline: TokenCounts) -> SessionTokenSummary? {
+        guard let adjusted = TokenCounts(summary: self).subtracting(baseline) else {
+            return nil
+        }
+        return SessionTokenSummary(
+            model: model,
+            inputTokens: adjusted.inputTokens,
+            cachedInputTokens: adjusted.cachedInputTokens,
+            outputTokens: adjusted.outputTokens,
+            totalTokens: adjusted.totalTokens
+        )
+    }
 }
 
 private struct FileSignature: Equatable {
