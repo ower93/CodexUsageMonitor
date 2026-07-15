@@ -70,7 +70,7 @@ struct SessionTokenSummary: Sendable {
 }
 
 struct APICostLedger: Codable, Sendable {
-    private static let currentSchemaVersion = 1
+    private static let currentSchemaVersion = 2
 
     private(set) var schemaVersion: Int
     private(set) var checkpoints: [String: Checkpoint]
@@ -82,17 +82,22 @@ struct APICostLedger: Codable, Sendable {
         records = []
     }
 
+    var requiresRebuild: Bool {
+        schemaVersion != Self.currentSchemaVersion
+    }
+
     @discardableResult
     mutating func observe(
         sessionID: String,
         summary: SessionTokenSummary,
         initialUsageDay: String,
         incrementalUsageDay: String,
-        price: APIModelPrice?
+        price: APIModelPrice?,
+        inheritedBaseline: TokenCounts? = nil
     ) -> Bool {
         let current = TokenCounts(summary: summary)
-        let previous = checkpoints[sessionID]?.counts
-        checkpoints[sessionID] = Checkpoint(model: summary.model, counts: current)
+        let previousCheckpoint = checkpoints[sessionID]
+        let previous = previousCheckpoint?.counts
 
         let delta: TokenCounts
         let usageDay: String
@@ -100,7 +105,7 @@ struct APICostLedger: Codable, Sendable {
             guard let incremental = current.delta(since: previous) else {
                 // A rewritten or truncated log must not subtract or reprice
                 // costs that were already frozen in the ledger.
-                return true
+                return false
             }
             delta = incremental
             usageDay = incrementalUsageDay
@@ -109,29 +114,76 @@ struct APICostLedger: Codable, Sendable {
             usageDay = initialUsageDay
         }
 
+        checkpoints[sessionID] = Checkpoint(
+            model: summary.model,
+            counts: current,
+            inheritedBaseline: inheritedBaseline ?? previousCheckpoint?.inheritedBaseline
+        )
+
         guard delta.totalTokens > 0 else { return previous == nil }
+        addRecord(
+            sessionID: sessionID,
+            usageDay: usageDay,
+            model: summary.model,
+            counts: delta,
+            price: price
+        )
+        return true
+    }
+
+    @discardableResult
+    mutating func replaceHistory(
+        sessionID: String,
+        history: SessionUsageHistory,
+        inheritedBaseline: TokenCounts?
+    ) -> Bool {
+        records.removeAll { $0.sessionID == sessionID }
+        checkpoints[sessionID] = Checkpoint(
+            model: history.summary.model,
+            counts: TokenCounts(summary: history.summary),
+            inheritedBaseline: inheritedBaseline
+        )
+
+        for slice in history.slices where slice.counts.totalTokens > 0 {
+            addRecord(
+                sessionID: sessionID,
+                usageDay: slice.usageDay,
+                model: slice.model,
+                counts: slice.counts,
+                price: APIModelPrice.price(for: slice.model)
+            )
+        }
+        return true
+    }
+
+    private mutating func addRecord(
+        sessionID: String,
+        usageDay: String,
+        model: String,
+        counts: TokenCounts,
+        price: APIModelPrice?
+    ) {
         let usd = price.map {
-            SessionAPICostEstimator.estimatedUSD(price: $0, counts: delta)
+            SessionAPICostEstimator.estimatedUSD(price: $0, counts: counts)
         } ?? 0
 
         if let index = records.firstIndex(where: {
             $0.sessionID == sessionID
                 && $0.usageDay == usageDay
-                && $0.model == summary.model
+                && $0.model == model
                 && $0.price == price
         }) {
-            records[index].add(delta, usd: usd)
+            records[index].add(counts, usd: usd)
         } else {
             records.append(Record(
                 sessionID: sessionID,
                 usageDay: usageDay,
-                model: summary.model,
-                counts: delta,
+                model: model,
+                counts: counts,
                 price: price,
                 usd: usd
             ))
         }
-        return true
     }
 
     func estimate(sevenDayKeys: Set<String>) -> CodexAPICostEstimate? {
@@ -171,6 +223,7 @@ extension APICostLedger {
     struct Checkpoint: Codable, Sendable {
         let model: String
         let counts: TokenCounts
+        let inheritedBaseline: TokenCounts?
     }
 
     struct Record: Codable, Sendable {
@@ -193,6 +246,13 @@ struct TokenCounts: Codable, Equatable, Sendable {
     private(set) var cachedInputTokens: Int64
     private(set) var outputTokens: Int64
     private(set) var totalTokens: Int64
+
+    static let zero = TokenCounts(
+        inputTokens: 0,
+        cachedInputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0
+    )
 
     init(summary: SessionTokenSummary) {
         inputTokens = max(0, summary.inputTokens)
@@ -226,6 +286,22 @@ struct TokenCounts: Codable, Equatable, Sendable {
             cachedInputTokens: cachedInputTokens - previous.cachedInputTokens,
             outputTokens: outputTokens - previous.outputTokens,
             totalTokens: totalTokens - previous.totalTokens
+        )
+    }
+
+    func subtracting(_ baseline: TokenCounts) -> TokenCounts? {
+        guard
+            inputTokens >= baseline.inputTokens,
+            cachedInputTokens >= baseline.cachedInputTokens,
+            outputTokens >= baseline.outputTokens,
+            totalTokens >= baseline.totalTokens
+        else { return nil }
+
+        return TokenCounts(
+            inputTokens: inputTokens - baseline.inputTokens,
+            cachedInputTokens: cachedInputTokens - baseline.cachedInputTokens,
+            outputTokens: outputTokens - baseline.outputTokens,
+            totalTokens: totalTokens - baseline.totalTokens
         )
     }
 
@@ -291,6 +367,21 @@ struct APICostLedgerStore: Sendable {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try encoder.encode(ledger).write(to: url, options: .atomic)
+    }
+
+    @discardableResult
+    func backupLegacyLedger(schemaVersion: Int) throws -> URL? {
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: url.path) else { return nil }
+
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyyMMdd-HHmmss-SSS"
+        let backupName = "token-cost-ledger-v\(schemaVersion)-backup-\(formatter.string(from: Date())).json"
+        let migrationBackupURL = url.deletingLastPathComponent().appendingPathComponent(backupName)
+        try fileManager.copyItem(at: url, to: migrationBackupURL)
+        return migrationBackupURL
     }
 
     private var backupURL: URL {

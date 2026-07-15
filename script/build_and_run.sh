@@ -4,6 +4,8 @@ set -euo pipefail
 MODE="${1:-run}"
 APP_NAME="CodexUsageMonitor"
 BUNDLE_ID="com.kevinchen.CodexUsageMonitor"
+APP_VERSION="1.2"
+BUILD_NUMBER="2"
 MIN_SYSTEM_VERSION="14.0"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -11,7 +13,8 @@ DIST_DIR="$ROOT_DIR/dist"
 SDK_PATH="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"
 SWIFT_BIN="$(/usr/bin/xcrun --find swift)"
 CACHE_DIR="$ROOT_DIR/work/xcode-build-cache"
-BUILD_DIR="$CACHE_DIR/build"
+BUILD_DIR="${CODEX_USAGE_BUILD_DIR:-$CACHE_DIR/build}"
+BUILD_JOBS="${SWIFT_BUILD_JOBS:-1}"
 STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/CodexUsageMonitor.XXXXXX")"
 APP_BUNDLE="$STAGING_DIR/$APP_NAME.app"
 FINAL_APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
@@ -32,7 +35,11 @@ export SDKROOT="${SDKROOT:-$SDK_PATH}"
 export CLANG_MODULE_CACHE_PATH="$CACHE_DIR/clang"
 export SWIFTPM_MODULECACHE_OVERRIDE="$CACHE_DIR/swiftpm"
 
-"$SWIFT_BIN" build --disable-sandbox --scratch-path "$BUILD_DIR" --product "$APP_NAME"
+"$SWIFT_BIN" build \
+  --disable-sandbox \
+  --jobs "$BUILD_JOBS" \
+  --scratch-path "$BUILD_DIR" \
+  --product "$APP_NAME"
 BUILD_BINARY="$("$SWIFT_BIN" build --disable-sandbox --scratch-path "$BUILD_DIR" --show-bin-path)/$APP_NAME"
 
 mkdir -p "$APP_MACOS" "$APP_RESOURCES"
@@ -52,6 +59,10 @@ cat >"$INFO_PLIST" <<PLIST
   <string>Codex 用量</string>
   <key>CFBundleDisplayName</key>
   <string>Codex Usage Monitor</string>
+  <key>CFBundleShortVersionString</key>
+  <string>$APP_VERSION</string>
+  <key>CFBundleVersion</key>
+  <string>$BUILD_NUMBER</string>
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
   <key>CFBundlePackageType</key>
