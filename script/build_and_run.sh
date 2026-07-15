@@ -9,7 +9,7 @@ BUILD_NUMBER="2"
 MIN_SYSTEM_VERSION="14.0"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DIST_DIR="$ROOT_DIR/dist"
+DIST_DIR="${CODEX_USAGE_DIST_DIR:-$ROOT_DIR/dist}"
 SDK_PATH="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"
 SWIFT_BIN="$(/usr/bin/xcrun --find swift)"
 CACHE_DIR="$ROOT_DIR/work/xcode-build-cache"
@@ -79,6 +79,7 @@ PLIST
 
 /usr/bin/xattr -cr "$APP_BUNDLE"
 /usr/bin/codesign --force --deep --sign - "$APP_BUNDLE"
+/usr/bin/codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
 /usr/bin/ditto "$APP_BUNDLE" "$FINAL_APP_BUNDLE"
 /usr/bin/codesign --verify --deep "$FINAL_APP_BUNDLE"
 
