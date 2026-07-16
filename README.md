@@ -19,6 +19,8 @@
 
 菜单栏入口使用原生 `NSStatusItem`，弹层使用透明、无边框的自定义 `NSPanel`；窗口本身没有系统弹层底色，仅保留低强度的可控玻璃材质。
 
+详细的数据来源、app-server 调用和费用计算过程请参阅：[运行原理与 Codex 用量数据说明](docs/HOW_CODEX_USAGE_MONITOR_WORKS_ZH.md)。
+
 ### 功能
 
 - 实时显示 5 小时与每周 Codex 剩余额度和重置时间。
