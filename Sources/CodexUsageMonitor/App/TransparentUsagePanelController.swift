@@ -20,6 +20,7 @@ final class TransparentUsagePanelController {
     private let panel: TransparentUsagePanel
     private let tuning: GlassTuning
     private weak var statusItem: NSStatusItem?
+    private let refresh: () -> Void
     private let visibilityDidChange: (Bool) -> Void
     private var globalEventMonitor: Any?
     private var localEventMonitor: Any?
@@ -27,9 +28,11 @@ final class TransparentUsagePanelController {
     init(
         store: UsageStore,
         statusItem: NSStatusItem,
+        refresh: @escaping () -> Void,
         visibilityDidChange: @escaping (Bool) -> Void
     ) {
         self.statusItem = statusItem
+        self.refresh = refresh
         self.visibilityDidChange = visibilityDidChange
         tuning = .final
         panel = TransparentUsagePanel(
@@ -95,6 +98,7 @@ final class TransparentUsagePanelController {
             rootView: UsagePanelView(
                 store: store,
                 tuning: tuning,
+                onRefresh: refresh,
                 onHeightChange: { [weak self] height in
                     self?.resizePanel(to: height)
                 }

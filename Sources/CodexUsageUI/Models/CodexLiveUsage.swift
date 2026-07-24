@@ -7,6 +7,17 @@ struct CodexLiveUsage: Sendable {
     let dailyUsage: [CodexDailyUsage]
     let recentThreads: [CodexThreadUsage]
     let apiCostEstimate: CodexAPICostEstimate?
+
+    func replacingAPICostEstimate(_ estimate: CodexAPICostEstimate?) -> CodexLiveUsage {
+        CodexLiveUsage(
+            rateLimits: rateLimits,
+            availableResetCount: availableResetCount,
+            lifetimeTokens: lifetimeTokens,
+            dailyUsage: dailyUsage,
+            recentThreads: recentThreads,
+            apiCostEstimate: estimate
+        )
+    }
 }
 
 struct CodexAPICostEstimate: Sendable {

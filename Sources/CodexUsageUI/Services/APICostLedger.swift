@@ -70,20 +70,89 @@ struct SessionTokenSummary: Sendable {
 }
 
 struct APICostLedger: Codable, Sendable {
-    private static let currentSchemaVersion = 2
+    // Schema 3 marks the metadata-resolution fix. Schema migrations only update
+    // structure; frozen price records and their stored USD values are retained.
+    private static let currentSchemaVersion = 3
 
     private(set) var schemaVersion: Int
+    private(set) var revision: UInt64
     private(set) var checkpoints: [String: Checkpoint]
     private(set) var records: [Record]
 
     init() {
         schemaVersion = Self.currentSchemaVersion
+        revision = 0
         checkpoints = [:]
         records = []
     }
 
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case revision
+        case checkpoints
+        case records
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        revision = try container.decodeIfPresent(UInt64.self, forKey: .revision) ?? 0
+        checkpoints = try container.decode(
+            [String: Checkpoint].self,
+            forKey: .checkpoints
+        )
+        records = try container.decode([Record].self, forKey: .records)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(revision, forKey: .revision)
+        try container.encode(checkpoints, forKey: .checkpoints)
+        try container.encode(records, forKey: .records)
+    }
+
     var requiresRebuild: Bool {
         schemaVersion != Self.currentSchemaVersion
+    }
+
+    mutating func migrateToCurrentSchemaPreservingHistory() -> LegacyPriceBook {
+        var legacyPrices = LegacyPriceBook()
+        let malformedSessionIDs = Set(
+            checkpoints.keys.filter { Self.canonicalSessionID(from: $0) == nil }
+        )
+
+        for record in records
+        where malformedSessionIDs.contains(record.sessionID)
+            || Self.canonicalSessionID(from: record.sessionID) == nil {
+            guard let canonicalID = Self.embeddedSessionID(in: record.sessionID) else {
+                continue
+            }
+            legacyPrices.insert(
+                price: record.price,
+                sessionID: canonicalID,
+                usageDay: record.usageDay,
+                model: record.model
+            )
+        }
+
+        // Schema 2 could key unresolved archived sessions by the complete
+        // rollout filename. Those entries contain copied parent context and are
+        // known-invalid billing history. Keep every UUID-keyed frozen record,
+        // but let the affected sessions be rebuilt from their metadata while
+        // reusing the historical price snapshots collected above.
+        checkpoints = checkpoints.filter {
+            Self.canonicalSessionID(from: $0.key) != nil
+        }
+        records.removeAll {
+            Self.canonicalSessionID(from: $0.sessionID) == nil
+        }
+        schemaVersion = Self.currentSchemaVersion
+        return legacyPrices
+    }
+
+    mutating func advanceRevision() {
+        revision = revision == UInt64.max ? 1 : revision + 1
     }
 
     @discardableResult
@@ -132,10 +201,52 @@ struct APICostLedger: Codable, Sendable {
     }
 
     @discardableResult
+    mutating func observeIncrement(
+        sessionID: String,
+        summary: SessionTokenSummary,
+        slices: [SessionUsageSlice],
+        inheritedBaseline: TokenCounts? = nil
+    ) -> Bool {
+        let current = TokenCounts(summary: summary)
+        guard let previousCheckpoint = checkpoints[sessionID],
+              let expectedDelta = current.delta(since: previousCheckpoint.counts)
+        else {
+            return false
+        }
+
+        var slicedDelta = TokenCounts.zero
+        for slice in slices {
+            slicedDelta.add(slice.counts)
+        }
+        guard slicedDelta == expectedDelta else {
+            // Never advance the durable checkpoint unless every token in the
+            // delta has an event-day and model attribution.
+            return false
+        }
+
+        checkpoints[sessionID] = Checkpoint(
+            model: summary.model,
+            counts: current,
+            inheritedBaseline: inheritedBaseline ?? previousCheckpoint.inheritedBaseline
+        )
+        for slice in slices where slice.counts.totalTokens > 0 {
+            addRecord(
+                sessionID: sessionID,
+                usageDay: slice.usageDay,
+                model: slice.model,
+                counts: slice.counts,
+                price: APIModelPrice.price(for: slice.model)
+            )
+        }
+        return expectedDelta.totalTokens > 0
+    }
+
+    @discardableResult
     mutating func replaceHistory(
         sessionID: String,
         history: SessionUsageHistory,
-        inheritedBaseline: TokenCounts?
+        inheritedBaseline: TokenCounts?,
+        legacyPrices: LegacyPriceBook = LegacyPriceBook()
     ) -> Bool {
         records.removeAll { $0.sessionID == sessionID }
         checkpoints[sessionID] = Checkpoint(
@@ -145,15 +256,34 @@ struct APICostLedger: Codable, Sendable {
         )
 
         for slice in history.slices where slice.counts.totalTokens > 0 {
+            let price = legacyPrices.price(
+                sessionID: sessionID,
+                usageDay: slice.usageDay,
+                model: slice.model
+            )
             addRecord(
                 sessionID: sessionID,
                 usageDay: slice.usageDay,
                 model: slice.model,
                 counts: slice.counts,
-                price: APIModelPrice.price(for: slice.model)
+                price: price.wasRecorded
+                    ? price.value
+                    : APIModelPrice.price(for: slice.model)
             )
         }
         return true
+    }
+
+    private static func canonicalSessionID(from value: String) -> String? {
+        UUID(uuidString: value)?.uuidString.lowercased()
+    }
+
+    private static func embeddedSessionID(in value: String) -> String? {
+        let pattern = #"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"#
+        guard let range = value.range(of: pattern, options: .regularExpression),
+              let canonical = canonicalSessionID(from: String(value[range]))
+        else { return nil }
+        return canonical
     }
 
     private mutating func addRecord(
@@ -220,13 +350,80 @@ struct APICostLedger: Codable, Sendable {
 }
 
 extension APICostLedger {
-    struct Checkpoint: Codable, Sendable {
+    struct LegacyPriceBook {
+        struct LookupResult {
+            let wasRecorded: Bool
+            let value: APIModelPrice?
+        }
+
+        private struct ExactKey: Hashable {
+            let sessionID: String
+            let usageDay: String
+            let model: String
+        }
+
+        private struct ModelKey: Hashable {
+            let sessionID: String
+            let model: String
+        }
+
+        private struct Snapshot {
+            let price: APIModelPrice?
+        }
+
+        private var exact: [ExactKey: Snapshot] = [:]
+        private var byModel: [ModelKey: Snapshot] = [:]
+
+        init() {}
+
+        mutating func insert(
+            price: APIModelPrice?,
+            sessionID: String,
+            usageDay: String,
+            model: String
+        ) {
+            let exactKey = ExactKey(
+                sessionID: sessionID,
+                usageDay: usageDay,
+                model: model
+            )
+            let modelKey = ModelKey(sessionID: sessionID, model: model)
+            if exact[exactKey] == nil {
+                exact[exactKey] = Snapshot(price: price)
+            }
+            if byModel[modelKey] == nil {
+                byModel[modelKey] = Snapshot(price: price)
+            }
+        }
+
+        func price(
+            sessionID: String,
+            usageDay: String,
+            model: String
+        ) -> LookupResult {
+            let exactKey = ExactKey(
+                sessionID: sessionID,
+                usageDay: usageDay,
+                model: model
+            )
+            if let snapshot = exact[exactKey] {
+                return LookupResult(wasRecorded: true, value: snapshot.price)
+            }
+            let modelKey = ModelKey(sessionID: sessionID, model: model)
+            if let snapshot = byModel[modelKey] {
+                return LookupResult(wasRecorded: true, value: snapshot.price)
+            }
+            return LookupResult(wasRecorded: false, value: nil)
+        }
+    }
+
+    struct Checkpoint: Codable, Equatable, Sendable {
         let model: String
         let counts: TokenCounts
         let inheritedBaseline: TokenCounts?
     }
 
-    struct Record: Codable, Sendable {
+    struct Record: Codable, Equatable, Sendable {
         let sessionID: String
         let usageDay: String
         let model: String

@@ -1,65 +1,148 @@
 import Foundation
 
 enum SessionAPICostEstimator {
-    private static let cache = SessionSummaryCache()
     private static let ledgerLock = NSLock()
 
     static func estimate(
         now: Date = Date(),
-        ledgerURL: URL = APICostLedgerStore.defaultURL
+        ledgerURL: URL = APICostLedgerStore.defaultURL,
+        sessionRoots: [URL]? = nil
     ) -> CodexAPICostEstimate? {
-        let codexRoot = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".codex", isDirectory: true)
-        let sessionRoot = codexRoot.appendingPathComponent("sessions", isDirectory: true)
-        let archivedRoot = codexRoot.appendingPathComponent("archived_sessions", isDirectory: true)
-        let allFiles = allSessionFiles(in: [sessionRoot, archivedRoot])
+        let roots: [URL]
+        if let sessionRoots {
+            roots = sessionRoots
+        } else {
+            let codexRoot = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".codex", isDirectory: true)
+            roots = [
+                codexRoot.appendingPathComponent("sessions", isDirectory: true),
+                codexRoot.appendingPathComponent("archived_sessions", isDirectory: true)
+            ]
+        }
+        let allFiles = allSessionFiles(in: roots)
         let calendar = Calendar.current
-        let descriptors = allFiles.map(SessionUsageLogReader.descriptor(for:))
 
         ledgerLock.lock()
         defer { ledgerLock.unlock() }
 
         do {
             let store = APICostLedgerStore(url: ledgerURL)
+            let indexStore = SessionFileIndexStore(ledgerURL: ledgerURL)
             var ledger = try store.load()
-            var didChange = false
+            var didMigrateLedger = false
+            var legacyPrices = APICostLedger.LegacyPriceBook()
 
             if ledger.requiresRebuild {
                 try store.backupLegacyLedger(schemaVersion: ledger.schemaVersion)
-                ledger = APICostLedger()
-                didChange = true
+                legacyPrices = ledger.migrateToCurrentSchemaPreservingHistory()
+                didMigrateLedger = true
             }
 
+            let loadedIndex = indexStore.load()
+            let indexMatchesLedger = !didMigrateLedger
+                && loadedIndex.ledgerRevision == ledger.revision
+            let savedIndex = indexMatchesLedger
+                ? loadedIndex
+                : SessionFileIndex(ledgerRevision: ledger.revision)
+            var observations: [IndexedSessionObservation] = []
+            var didChange = didMigrateLedger
+            var indexDidChange = !indexMatchesLedger
+
+            for url in allFiles {
+                let previous = savedIndex.entries[SessionFileIndex.key(for: url)]
+                guard let inspection = SessionFileIndexInspector.inspect(
+                    url,
+                    previousEntry: previous
+                ) else { continue }
+
+                let mustResolveMetadata = inspection.change == .rebuilt
+                    || previous?.metadataResolved == false
+                let descriptor = mustResolveMetadata
+                    ? SessionUsageLogReader.descriptor(for: url)
+                    : previous?.descriptor(url: url)
+                        ?? SessionUsageLogReader.descriptor(for: url)
+                let state = previous.map {
+                    SessionLogCursorState(
+                        completeLineCursor: $0.completeLineCursor,
+                        currentModel: $0.currentModel,
+                        summary: $0.summary
+                    )
+                }
+                observations.append(IndexedSessionObservation(
+                    inspection: inspection,
+                    descriptor: descriptor,
+                    state: state,
+                    inheritedBaseline: previous?.inheritedBaseline,
+                    baselineResolutionAttempted: previous?.baselineResolutionAttempted ?? false
+                ))
+            }
+
+            // A transiently unreadable or partially-written session_meta line
+            // must not be treated as a root session. Doing so would price the
+            // copied history of a subagent and permanently inflate the ledger.
+            let resolvedDescriptors = observations
+                .map(\.descriptor)
+                .filter(\.metadataResolved)
+            let changedSessionIDs = Set(observations.compactMap { observation -> String? in
+                let previous = observation.inspection.previousEntry
+                if observation.inspection.change != .unchanged
+                    || previous?.sessionID != observation.descriptor.sessionID
+                    || previous?.metadataResolved != observation.descriptor.metadataResolved {
+                    return observation.descriptor.sessionID
+                }
+                return nil
+            })
+
             var inheritedBaselines: [String: TokenCounts] = [:]
-            for descriptor in descriptors {
-                if let baseline = ledger.checkpoints[descriptor.sessionID]?.inheritedBaseline {
-                    inheritedBaselines[descriptor.sessionID] = baseline
+            for observation in observations {
+                if let checkpoint = ledger.checkpoints[observation.descriptor.sessionID],
+                   let baseline = checkpoint.inheritedBaseline {
+                    inheritedBaselines[observation.descriptor.sessionID] = baseline
+                } else if let baseline = observation.inheritedBaseline {
+                    inheritedBaselines[observation.descriptor.sessionID] = baseline
                 }
             }
 
-            let unresolvedForkIDs = Set(descriptors.compactMap { descriptor in
-                descriptor.parentSessionID != nil
-                    && inheritedBaselines[descriptor.sessionID] == nil
-                    ? descriptor.sessionID
-                    : nil
+            let unresolvedForkIDs = Set<String>(observations.compactMap { observation -> String? in
+                let descriptor = observation.descriptor
+                guard descriptor.metadataResolved,
+                      descriptor.parentSessionID != nil,
+                      inheritedBaselines[descriptor.sessionID] == nil
+                else { return nil }
+
+                // Do not rescan unchanged JSONL files forever, but retry when
+                // either the child or its parent changes.
+                if observation.inspection.change == .unchanged,
+                   observation.baselineResolutionAttempted,
+                   let parentID = descriptor.parentSessionID,
+                   !changedSessionIDs.contains(parentID) {
+                    return nil
+                }
+                return descriptor.sessionID
             })
             if !unresolvedForkIDs.isEmpty {
                 inheritedBaselines.merge(
                     SessionUsageLogReader.inheritedBaselines(
-                        for: descriptors,
+                        for: resolvedDescriptors,
                         childSessionIDs: unresolvedForkIDs
                     ),
                     uniquingKeysWith: { saved, _ in saved }
                 )
             }
 
-            for descriptor in descriptors {
+            for index in observations.indices {
+                let descriptor = observations[index].descriptor
+                guard descriptor.metadataResolved else { continue }
                 let inheritedBaseline: TokenCounts
                 if descriptor.parentSessionID != nil {
-                    // A fork without a resolvable parent snapshot must remain
-                    // unpriced; billing its copied parent history would inflate
-                    // the account lifetime estimate.
+                    if unresolvedForkIDs.contains(descriptor.sessionID) {
+                        observations[index].baselineResolutionAttempted = true
+                        observations[index].inheritedBaseline =
+                            inheritedBaselines[descriptor.sessionID]
+                    }
                     guard let resolved = inheritedBaselines[descriptor.sessionID] else {
+                        // A fork without a resolvable parent snapshot remains
+                        // unpriced; billing copied context would inflate cost.
                         continue
                     }
                     inheritedBaseline = resolved
@@ -68,34 +151,73 @@ enum SessionAPICostEstimator {
                 }
 
                 if ledger.checkpoints[descriptor.sessionID] == nil {
-                    guard let history = SessionUsageLogReader.history(
+                    guard let read = SessionUsageLogReader.historyAndState(
                         for: descriptor,
                         inheritedBaseline: inheritedBaseline
-                    ) else { continue }
+                    ) else {
+                        if observations[index].inspection.change != .unchanged {
+                            observations[index].state = SessionUsageLogReader.warmState(
+                                for: descriptor,
+                                fileSize: observations[index].inspection.facts.size
+                            )
+                        }
+                        continue
+                    }
+                    observations[index].state = read.state
                     ledger.replaceHistory(
                         sessionID: descriptor.sessionID,
-                        history: history,
+                        history: read.history,
                         inheritedBaseline: descriptor.parentSessionID == nil
                             ? nil
-                            : inheritedBaseline
+                            : inheritedBaseline,
+                        legacyPrices: legacyPrices
                     )
                     didChange = true
                     continue
                 }
 
-                guard let cached = cache.observation(for: descriptor.url),
-                      let adjustedSummary = cached.summary.subtracting(inheritedBaseline)
+                let checkpoint = ledger.checkpoints[descriptor.sessionID]
+                guard let checkpoint else { continue }
+                let seed: SessionLogCursorState
+                switch observations[index].inspection.change {
+                case .unchanged:
+                    // The ledger was saved before this cursor was committed, so
+                    // an unchanged indexed file has nothing new to observe.
+                    continue
+                case .appended:
+                    if let previousState = observations[index].state,
+                       previousState.summary.map(TokenCounts.init(summary:))
+                        == rawCounts(
+                            checkpoint: checkpoint,
+                            inheritedBaseline: inheritedBaseline
+                        ) {
+                        seed = previousState
+                    } else {
+                        seed = incrementalSeed(
+                            checkpoint: checkpoint,
+                            inheritedBaseline: inheritedBaseline
+                        )
+                    }
+                case .rebuilt:
+                    seed = incrementalSeed(
+                        checkpoint: checkpoint,
+                        inheritedBaseline: inheritedBaseline
+                    )
+                }
+
+                guard let incremental = SessionUsageLogReader.incrementalRead(
+                    for: descriptor,
+                    previous: seed
+                ) else { continue }
+                observations[index].state = incremental.state
+
+                guard let summary = incremental.state.summary,
+                      let adjustedSummary = summary.subtracting(inheritedBaseline)
                 else { continue }
-                if ledger.observe(
+                if ledger.observeIncrement(
                     sessionID: descriptor.sessionID,
                     summary: adjustedSummary,
-                    initialUsageDay: initialUsageDay(
-                        for: descriptor.url,
-                        modifiedAt: cached.modifiedAt,
-                        calendar: calendar
-                    ),
-                    incrementalUsageDay: usageDay(for: cached.modifiedAt, calendar: calendar),
-                    price: APIModelPrice.price(for: adjustedSummary.model),
+                    slices: incremental.slices,
                     inheritedBaseline: descriptor.parentSessionID == nil
                         ? nil
                         : inheritedBaseline
@@ -103,8 +225,66 @@ enum SessionAPICostEstimator {
                     didChange = true
                 }
             }
-            if didChange {
+
+            var nextIndex = savedIndex
+            let livePaths = Set(observations.map {
+                SessionFileIndex.key(for: $0.inspection.url)
+            })
+            let removedPaths = Set(nextIndex.entries.keys).subtracting(livePaths)
+            if !removedPaths.isEmpty {
+                for path in removedPaths {
+                    nextIndex.entries.removeValue(forKey: path)
+                }
+                indexDidChange = true
+            }
+
+            for observation in observations {
+                let path = SessionFileIndex.key(for: observation.inspection.url)
+                if observation.inspection.change == .unchanged,
+                   var entry = savedIndex.entries[path] {
+                    let oldEntry = entry
+                    entry.sessionID = observation.descriptor.sessionID
+                    entry.parentSessionID = observation.descriptor.parentSessionID
+                    entry.forkedAt = observation.descriptor.forkedAt
+                    entry.metadataResolved = observation.descriptor.metadataResolved
+                    entry.inheritedBaseline = observation.inheritedBaseline
+                    entry.baselineResolutionAttempted =
+                        observation.baselineResolutionAttempted
+                    if let state = observation.state {
+                        entry.completeLineCursor = state.completeLineCursor
+                        entry.currentModel = state.currentModel
+                        entry.summaryModel = state.summary?.model
+                        entry.summaryCounts = state.summary.map(TokenCounts.init(summary:))
+                    }
+                    if entry != oldEntry {
+                        nextIndex.entries[path] = entry
+                        indexDidChange = true
+                    }
+                    continue
+                }
+
+                guard let entry = SessionFileIndexInspector.makeEntry(
+                    inspection: observation.inspection,
+                    descriptor: observation.descriptor,
+                    state: observation.state,
+                    inheritedBaseline: observation.inheritedBaseline,
+                    baselineResolutionAttempted: observation.baselineResolutionAttempted
+                ) else { continue }
+                if nextIndex.entries[path] != entry {
+                    nextIndex.entries[path] = entry
+                    indexDidChange = true
+                }
+            }
+
+            if didChange || indexDidChange {
+                // The cost ledger is the source of truth. Persist it before an
+                // index cursor can acknowledge bytes as consumed.
+                ledger.advanceRevision()
+                nextIndex.ledgerRevision = ledger.revision
                 try store.save(ledger)
+                // The index is disposable. A failed cache write must not hide a
+                // successfully persisted cost estimate.
+                try? indexStore.save(nextIndex)
             }
             return ledger.estimate(sevenDayKeys: sevenDayKeys(now: now, calendar: calendar))
         } catch {
@@ -233,6 +413,36 @@ enum SessionAPICostEstimator {
             components.day ?? 0
         )
     }
+
+    private static func incrementalSeed(
+        checkpoint: APICostLedger.Checkpoint,
+        inheritedBaseline: TokenCounts
+    ) -> SessionLogCursorState {
+        let counts = rawCounts(
+            checkpoint: checkpoint,
+            inheritedBaseline: inheritedBaseline
+        )
+        return SessionLogCursorState(
+            completeLineCursor: 0,
+            currentModel: "unknown",
+            summary: SessionTokenSummary(
+                model: checkpoint.model,
+                inputTokens: counts.inputTokens,
+                cachedInputTokens: counts.cachedInputTokens,
+                outputTokens: counts.outputTokens,
+                totalTokens: counts.totalTokens
+            )
+        )
+    }
+
+    private static func rawCounts(
+        checkpoint: APICostLedger.Checkpoint,
+        inheritedBaseline: TokenCounts
+    ) -> TokenCounts {
+        var counts = checkpoint.counts
+        counts.add(inheritedBaseline)
+        return counts
+    }
 }
 
 private extension SessionTokenSummary {
@@ -250,116 +460,10 @@ private extension SessionTokenSummary {
     }
 }
 
-private struct FileSignature: Equatable {
-    let size: Int
-    let modifiedAt: Date
-}
-
-private struct CachedSessionSummary {
-    let summary: SessionTokenSummary
-    let modifiedAt: Date
-}
-
-private final class SessionSummaryCache: @unchecked Sendable {
-    private struct Entry {
-        let signature: FileSignature
-        let summary: SessionTokenSummary?
-    }
-
-    private let lock = NSLock()
-    private var entries: [String: Entry] = [:]
-
-    func observation(for url: URL) -> CachedSessionSummary? {
-        guard let signature = signature(for: url) else { return nil }
-        let path = url.path
-
-        lock.lock()
-        let cached = entries[path]
-        lock.unlock()
-        if cached?.signature == signature {
-            return cached?.summary.map {
-                CachedSessionSummary(summary: $0, modifiedAt: signature.modifiedAt)
-            }
-        }
-
-        let parsed = SessionSummaryReader.read(from: url, fileSize: signature.size)
-        lock.lock()
-        entries[path] = Entry(signature: signature, summary: parsed)
-        lock.unlock()
-        return parsed.map {
-            CachedSessionSummary(summary: $0, modifiedAt: signature.modifiedAt)
-        }
-    }
-
-    private func signature(for url: URL) -> FileSignature? {
-        let keys: Set<URLResourceKey> = [.fileSizeKey, .contentModificationDateKey]
-        guard
-            let values = try? url.resourceValues(forKeys: keys),
-            let size = values.fileSize,
-            let modifiedAt = values.contentModificationDate
-        else { return nil }
-        return FileSignature(size: size, modifiedAt: modifiedAt)
-    }
-}
-
-private enum SessionSummaryReader {
-    static func read(from url: URL, fileSize: Int) -> SessionTokenSummary? {
-        if let summary = readTail(from: url, fileSize: fileSize, byteLimit: 131_072) {
-            return summary
-        }
-        return readTail(from: url, fileSize: fileSize, byteLimit: 1_048_576)
-    }
-
-    private static func readTail(from url: URL, fileSize: Int, byteLimit: Int) -> SessionTokenSummary? {
-        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
-        defer { try? handle.close() }
-
-        let readSize = min(fileSize, byteLimit)
-        do {
-            try handle.seek(toOffset: UInt64(max(0, fileSize - readSize)))
-            let data = try handle.readToEnd() ?? Data()
-            var tokenUsage: [String: Any]?
-
-            for rawLine in data.split(separator: 0x0A).reversed() {
-                guard
-                    let object = try? JSONSerialization.jsonObject(with: Data(rawLine)) as? [String: Any],
-                    let type = object["type"] as? String,
-                    let payload = object["payload"] as? [String: Any]
-                else { continue }
-
-                if tokenUsage == nil,
-                   type == "event_msg",
-                   payload["type"] as? String == "token_count",
-                   let info = payload["info"] as? [String: Any],
-                   let total = info["total_token_usage"] as? [String: Any] {
-                    tokenUsage = total
-                    continue
-                }
-
-                if let usage = tokenUsage,
-                   type == "turn_context",
-                   let model = payload["model"] as? String {
-                    let input = int64(usage["input_tokens"]) ?? 0
-                    let cached = int64(usage["cached_input_tokens"]) ?? 0
-                    let output = int64(usage["output_tokens"]) ?? 0
-                    let total = int64(usage["total_tokens"]) ?? (input + output)
-                    guard total > 0 else { return nil }
-                    return SessionTokenSummary(
-                        model: model,
-                        inputTokens: input,
-                        cachedInputTokens: cached,
-                        outputTokens: output,
-                        totalTokens: total
-                    )
-                }
-            }
-        } catch {
-            return nil
-        }
-        return nil
-    }
-
-    private static func int64(_ value: Any?) -> Int64? {
-        (value as? NSNumber)?.int64Value
-    }
+private struct IndexedSessionObservation {
+    let inspection: SessionFileIndexInspection
+    let descriptor: SessionFileDescriptor
+    var state: SessionLogCursorState?
+    var inheritedBaseline: TokenCounts?
+    var baselineResolutionAttempted: Bool
 }

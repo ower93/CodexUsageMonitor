@@ -10,6 +10,7 @@ public struct UsagePanelView: View {
 
     let tuning: GlassTuning
     private let preferencesEnabled: Bool
+    private let onRefresh: (() -> Void)?
     private let onHeightChange: ((CGFloat) -> Void)?
 
     public init(
@@ -17,11 +18,13 @@ public struct UsagePanelView: View {
         tuning: GlassTuning,
         preferencesEnabled: Bool = true,
         settingsInitiallyPresented: Bool = false,
+        onRefresh: (() -> Void)? = nil,
         onHeightChange: ((CGFloat) -> Void)? = nil
     ) {
         self.store = store
         self.tuning = tuning
         self.preferencesEnabled = preferencesEnabled
+        self.onRefresh = onRefresh
         self.onHeightChange = onHeightChange
         _isShowingSettings = State(initialValue: settingsInitiallyPresented)
     }
@@ -54,7 +57,12 @@ public struct UsagePanelView: View {
 
     public var body: some View {
         VStack(spacing: 12) {
-            HeaderView(store: store, tuning: tuning, isShowingSettings: $isShowingSettings)
+            HeaderView(
+                store: store,
+                tuning: tuning,
+                isShowingSettings: $isShowingSettings,
+                onRefresh: onRefresh
+            )
             if showUsageSummary {
                 UsageSummaryCard(snapshot: store.snapshot, language: store.language, tuning: tuning)
             }
@@ -121,13 +129,6 @@ public struct UsagePanelView: View {
         }
         .onChange(of: displayedHeight) { _, newHeight in
             onHeightChange?(newHeight)
-        }
-        .task {
-            await store.refresh()
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(60))
-                await store.refresh()
-            }
         }
     }
 }
@@ -227,6 +228,7 @@ private struct HeaderView: View {
     @ObservedObject var store: UsageStore
     let tuning: GlassTuning
     @Binding var isShowingSettings: Bool
+    let onRefresh: (() -> Void)?
 
     var body: some View {
         HStack(spacing: 12) {
@@ -266,7 +268,11 @@ private struct HeaderView: View {
 
             HStack(spacing: 4) {
                 Button {
-                    Task { await store.refresh() }
+                    if let onRefresh {
+                        onRefresh()
+                    } else {
+                        Task { await store.refresh() }
+                    }
                 } label: {
                     ZStack {
                         Circle()
