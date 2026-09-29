@@ -7,7 +7,7 @@ struct UsageStoreLifecycleTests {
     func liveRefreshMergesTheNewestCostEstimateWhenItReturns() async throws {
         let client = SuspendedUsageClient()
         let estimate = CodexAPICostEstimate(
-            sevenDayUSD: 12,
+            currentWeekUSD: 12,
             lifetimeUSD: 34,
             pricedTokens: 100,
             observedTokens: 100,
@@ -27,7 +27,7 @@ struct UsageStoreLifecycleTests {
         await client.complete(with: Self.liveUsage)
         await liveTask.value
 
-        #expect(store.snapshot.apiCostEstimate?.sevenDayUSD == 12)
+        #expect(store.snapshot.apiCostEstimate?.currentWeekUSD == 12)
         #expect(store.snapshot.apiCostEstimate?.lifetimeUSD == 34)
         await store.shutdown()
     }
@@ -140,7 +140,7 @@ private final class BlockingCostEstimator: @unchecked Sendable {
         lock.unlock()
         releaseSemaphore.wait()
         return CodexAPICostEstimate(
-            sevenDayUSD: 99,
+            currentWeekUSD: 99,
             lifetimeUSD: 999,
             pricedTokens: 100,
             observedTokens: 100,

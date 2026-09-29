@@ -4,8 +4,8 @@ set -euo pipefail
 MODE="${1:-run}"
 APP_NAME="CodexUsageMonitor"
 BUNDLE_ID="com.kevinchen.CodexUsageMonitor"
-APP_VERSION="1.2.1"
-BUILD_NUMBER="4"
+APP_VERSION="1.2.4"
+BUILD_NUMBER="7"
 MIN_SYSTEM_VERSION="14.0"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

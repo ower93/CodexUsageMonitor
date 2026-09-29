@@ -15,7 +15,7 @@
 
 ## 中文
 
-一个原生 macOS 菜单栏 Codex 用量监控工具。点击菜单栏里的仪表图标和百分比，即可展开毛玻璃质感的额度、token 统计、最近任务和 API 等值费用面板。当前版本为 1.2.1。
+一个原生 macOS 菜单栏 Codex 用量监控工具。点击菜单栏里的仪表图标和百分比，即可展开毛玻璃质感的额度、token 统计、最近任务和 API 等值费用面板。当前版本为 1.2.4。
 
 菜单栏入口使用原生 `NSStatusItem`，弹层使用透明、无边框的自定义 `NSPanel`；窗口本身没有系统弹层底色，仅保留低强度的可控玻璃材质。
 
@@ -25,7 +25,8 @@
 
 - 实时显示 5 小时与每周 Codex 剩余额度和重置时间。
 - 显示最近线程、当前线程、近 7 天及累计 token。
-- 按模型的公开 API 标准价估算近 7 天与本机可见生涯 token 价值，普通输入、缓存输入和输出分别计价，并为历史用量冻结当时的价格快照；子任务继承的父线程上下文不会被重复计费。
+- 按模型的公开 API 标准价估算本周与本机可见生涯 token 价值；本周从本机时区周一 00:00 起累计。普通输入、缓存输入和输出分别计价，并为历史用量冻结当时的价格快照；子任务继承的父线程上下文不会被重复计费。费用卡片不再显示模型名称，改为显示统计起点；账户近 7 天 token 与 Codex 额度口径保持不变。
+- 支持 GPT-6 Astra，并更新 GPT-5.6 Sol / Terra / Luna 的价格快照。旧版留下的未计价 GPT-6 记录会先备份再补估，记录补估日期；已计价历史不变。
 - 通过右上角设置按钮选择显示的卡片，并可启用登录时自动启动。
 - 支持中文与英文；首次启动匹配 macOS 首选语言，之后可在设置中随时切换并记住选择。
 - 复用 Codex Desktop 登录状态，无需额外填写 API Key。
@@ -36,7 +37,7 @@
 
 从 [Releases](https://github.com/ower93/CodexUsageMonitor/releases/latest) 下载 `CodexUsageMonitor.app.zip`，解压后打开应用。
 
-运行要求：macOS 14 或更高版本，并已安装且登录 `/Applications/Codex.app`。
+运行要求：macOS 14 或更高版本，并已安装且登录 `/Applications/Codex.app` 或 `~/Applications/Codex.app`。v1.2.4 兼容 Codex.app 内置 CLI 的新旧目录布局。
 
 ### 构建与运行
 
@@ -56,13 +57,24 @@
 
 API 等值费用会扫描本机 `~/.codex/sessions` 与 `~/.codex/archived_sessions` 中可见的会话日志，根据每个事件发生时使用的模型，将普通输入、缓存输入和输出 token 分别估算。对于 Codex 子任务，应用会从父线程在派生时刻的累计用量中建立继承基线，只计算子任务真正新增的 token，避免复制的上下文被重复计价；如果旧日志缺少足够信息来可靠还原继承基线，该子任务会被保守地跳过，而不会把复制的父线程用量当成新增费用。
 
-schema 3 计价账本保存在 `~/Library/Application Support/CodexUsageMonitor/token-cost-ledger.json`；每次只按当时价格记录新增 token，未来 API 调价不会重新计算已有历史。其旁边的 `session-file-index.json` 是跨启动保留、但可随时删除并重建的增量扫描索引：未变化日志只检查文件元数据，安全确认是追加写入后只解析新增的完整 JSONL 内容。账本和索引通过 revision 绑定，索引不是计费事实来源，丢失、损坏或落后时会重建，不能覆盖已冻结费用。遇到旧 schema 时，应用会先备份账本，保留合法 session 的价格快照和费用；只对旧版已知的文件名键重复记录做针对性重建，并继续复用它们保存的历史价格。该金额不是实际账单，且不包含税费与长上下文加价。
+schema 3 计价账本保存在 `~/Library/Application Support/CodexUsageMonitor/token-cost-ledger.json`；每次只按当时价格记录新增 token，未来 API 调价不会重新计算已有历史。其旁边的 `session-file-index.json` 是跨启动保留、但可随时删除并重建的增量扫描索引：未变化日志只检查文件元数据，安全确认是追加写入后只解析新增的完整 JSONL 内容。账本和索引通过 revision 绑定，索引不是计费事实来源，丢失、损坏或落后时会重建，不能覆盖已冻结费用。遇到旧 schema 时，应用会先备份账本，保留合法 session 的价格快照和费用；只对旧版已知的文件名键重复记录做针对性重建，并继续复用它们保存的历史价格。该金额按标准短上下文价估算，不是实际账单，不含缓存写入溢价、长上下文或 Fast 模式加价及税费。
+
+2026-09-07 核实的[官方标准 API 价格](https://developers.openai.com/api/docs/pricing)，单位为美元／百万 token：
+
+| 模型 | 普通输入 | 缓存输入 | 输出 |
+| --- | ---: | ---: | ---: |
+| GPT-6 Astra | 10 | 1 | 50 |
+| GPT-5.6 Sol | 4 | 0.4 | 20 |
+| GPT-5.6 Terra | 2 | 0.2 | 12 |
+| GPT-5.6 Luna | 0.2 | 0.02 | 1.2 |
+
+价格版本为 `2026-09-07-standard`。v1.2.2 仅为之前 `price = null` 的 GPT-6 Astra 记录补估，在 `pricingBackfill` 中保存日期、原因和来源链接，并保留原使用日期与 token 数。补估前的独立备份以 `token-cost-ledger-before-gpt6-backfill-` 开头；同一记录不会重复补估。其他未计价模型保持未计价。
 
 应用启动时立即启动两条互相独立的刷新循环：账户额度、账户 token 与最近任务每 60 秒刷新，API 等值费用每 15 分钟刷新。显示或隐藏面板不会创建额外轮询任务；点击右上角按钮会手动刷新两类数据。退出应用时会先取消刷新循环，再关闭管道并在限定等待时间内终止本地 `app-server`。
 
 ## English
 
-Codex Usage Monitor 1.2.1 is a native macOS menu bar app for tracking Codex limits, token usage, recent tasks, and estimated API-equivalent cost in a polished glass panel.
+Codex Usage Monitor 1.2.4 is a native macOS menu bar app for tracking Codex limits, token usage, recent tasks, and estimated API-equivalent cost in a polished glass panel.
 
 It uses a native `NSStatusItem` menu bar entry and a transparent, borderless custom `NSPanel`. The panel combines `NSVisualEffectView` background blur with carefully tuned SwiftUI materials.
 
@@ -70,7 +82,8 @@ It uses a native `NSStatusItem` menu bar entry and a transparent, borderless cus
 
 - Live 5-hour and weekly Codex limits, remaining percentages, and reset times.
 - Latest thread, last 7 days, and lifetime token totals.
-- Estimated API-equivalent value based on public model pricing, with regular input, cached input, and output tokens priced separately, historical price snapshots preserved, and inherited parent context excluded from subagent cost.
+- Estimated API-equivalent value for this week and locally visible lifetime usage. This week starts on Monday at 00:00 in your Mac's local time zone. Regular input, cached input, and output tokens are priced separately, historical price snapshots are preserved, and inherited parent context is excluded from subagent cost. The cost card shows the period start instead of model names; account last-7-days token totals and Codex limits are unchanged.
+- GPT-6 Astra support and updated GPT-5.6 Sol / Terra / Luna price snapshots. Previously unpriced GPT-6 records receive a dated estimate after a dedicated backup; existing priced history is preserved.
 - Card visibility controls and an optional Launch at Login setting.
 - Chinese and English interfaces. The first launch follows the preferred macOS language; later manual selections are remembered.
 - Reuses the existing Codex Desktop login session—no separate API key is required.
@@ -81,7 +94,7 @@ It uses a native `NSStatusItem` menu bar entry and a transparent, borderless cus
 
 Download `CodexUsageMonitor.app.zip` from the latest [GitHub Release](https://github.com/ower93/CodexUsageMonitor/releases/latest), unzip it, and open the app.
 
-Requirements: macOS 14 or later, with `/Applications/Codex.app` installed and signed in.
+Requirements: macOS 14 or later, with `/Applications/Codex.app` or `~/Applications/Codex.app` installed and signed in. Version 1.2.4 supports both bundled CLI layouts.
 
 ### Build and Run
 
@@ -101,7 +114,18 @@ The app talks to the local `app-server` bundled with Codex and reuses the curren
 
 The API-equivalent estimate scans locally visible sessions under `~/.codex/sessions` and `~/.codex/archived_sessions` and prices each event using the model active at that point. For Codex subagents, it derives an inherited baseline from the parent session at the fork timestamp and charges only the child session's newly generated tokens, preventing copied context from being counted twice. If an older log does not contain enough information to reconstruct that baseline reliably, the child session is conservatively skipped instead of treating copied parent usage as new cost.
 
-The schema-3 ledger is stored at `~/Library/Application Support/CodexUsageMonitor/token-cost-ledger.json`. Only newly observed tokens are charged at the price snapshot recorded at that time, so later API price changes do not reprice existing history. A durable but disposable `session-file-index.json` beside the ledger makes later scans incremental: unchanged logs require only file-metadata checks, while safely detected appends parse only newly completed JSONL data. Ledger and index revisions are bound together, so a missing, corrupt, or stale index is rebuilt and cannot overwrite frozen cost history. On an older schema, the app first backs up the ledger, preserves valid sessions and their price snapshots, and selectively rebuilds only known filename-keyed duplicate records while reusing their historical prices. The result is an estimate—not a bill—and excludes taxes and long-context surcharges.
+The schema-3 ledger is stored at `~/Library/Application Support/CodexUsageMonitor/token-cost-ledger.json`. Only newly observed tokens are charged at the price snapshot recorded at that time, so later API price changes do not reprice existing history. A durable but disposable `session-file-index.json` beside the ledger makes later scans incremental: unchanged logs require only file-metadata checks, while safely detected appends parse only newly completed JSONL data. Ledger and index revisions are bound together, so a missing, corrupt, or stale index is rebuilt and cannot overwrite frozen cost history. On an older schema, the app first backs up the ledger, preserves valid sessions and their price snapshots, and selectively rebuilds only known filename-keyed duplicate records while reusing their historical prices. The estimate uses standard short-context rates and excludes cache-write premiums, long-context and Fast-mode surcharges, and taxes.
+
+[Official standard API rates](https://developers.openai.com/api/docs/pricing) verified on September 7, 2026, in USD per million tokens:
+
+| Model | Input | Cached input | Output |
+| --- | ---: | ---: | ---: |
+| GPT-6 Astra | 10 | 1 | 50 |
+| GPT-5.6 Sol | 4 | 0.4 | 20 |
+| GPT-5.6 Terra | 2 | 0.2 | 12 |
+| GPT-5.6 Luna | 0.2 | 0.02 | 1.2 |
+
+The price snapshot version is `2026-09-07-standard`. Version 1.2.2 backfills only GPT-6 Astra records whose price was previously null. Each receives a `pricingBackfill` date, reason and source URL while keeping its original usage day and token counts. A separate `token-cost-ledger-before-gpt6-backfill-` backup is saved first, and repeat refreshes do not price the same record twice. Other unpriced models remain unpriced.
 
 Two independent loops start immediately with the app: account limits, account tokens, and recent tasks refresh every 60 seconds, while API-equivalent cost refreshes every 15 minutes. Opening or closing the panel does not create another polling task; the refresh button requests both updates. On quit, the loops are cancelled and the local `app-server` pipes and process are shut down within bounded waits.
 

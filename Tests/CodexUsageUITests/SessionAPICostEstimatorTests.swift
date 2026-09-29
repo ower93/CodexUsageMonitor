@@ -26,7 +26,7 @@ struct SessionAPICostEstimatorTests {
             outputTokens: 0
         ))
 
-        #expect(abs(usd - 0.50) < 0.000_001)
+        #expect(abs(usd - 0.40) < 0.000_001)
     }
 
     @Test
@@ -92,7 +92,7 @@ struct SessionAPICostEstimatorTests {
         )
         #expect(!changedWithoutNewTokens)
         let unchanged = try #require(ledger.estimate(
-            sevenDayKeys: ["2026-07-13", "2026-07-14"]
+            currentWeekDayKeys: ["2026-07-13", "2026-07-14"]
         ))
         #expect(abs(unchanged.lifetimeUSD - 2.64) < 0.000_001)
 
@@ -105,7 +105,7 @@ struct SessionAPICostEstimatorTests {
         )
         #expect(recordedIncrement)
         let updated = try #require(ledger.estimate(
-            sevenDayKeys: ["2026-07-13", "2026-07-14"]
+            currentWeekDayKeys: ["2026-07-13", "2026-07-14"]
         ))
 
         // $2.64 at the old price + $7.28 for only the new token delta.
@@ -154,7 +154,7 @@ struct SessionAPICostEstimatorTests {
         )
 
         let estimate = try #require(ledger.estimate(
-            sevenDayKeys: ["2026-07-13", "2026-07-14"]
+            currentWeekDayKeys: ["2026-07-13", "2026-07-14"]
         ))
         #expect(estimate.observedTokens == 2_000)
         #expect(estimate.pricedTokens == 1_000)
@@ -208,7 +208,7 @@ struct SessionAPICostEstimatorTests {
         #expect(recordedRecovery)
 
         let estimate = try #require(ledger.estimate(
-            sevenDayKeys: ["2026-07-13", "2026-07-14"]
+            currentWeekDayKeys: ["2026-07-13", "2026-07-14"]
         ))
         #expect(estimate.observedTokens == 1_200)
         #expect(abs(estimate.lifetimeUSD - 0.0012) < 0.000_001)
@@ -247,7 +247,7 @@ struct SessionAPICostEstimatorTests {
 
         try store.save(ledger)
         let restored = try store.load()
-        let estimate = try #require(restored.estimate(sevenDayKeys: ["2026-07-14"]))
+        let estimate = try #require(restored.estimate(currentWeekDayKeys: ["2026-07-14"]))
         let json = try String(contentsOf: store.url, encoding: .utf8)
 
         #expect(abs(estimate.lifetimeUSD - 3) < 0.000_001)
@@ -505,23 +505,30 @@ struct SessionAPICostEstimatorTests {
             history: history,
             inheritedBaseline: baseline
         )
-        let estimate = try #require(ledger.estimate(sevenDayKeys: ["2026-07-14"]))
-        #expect(abs(estimate.lifetimeUSD - 6.672_738) < 0.000_001)
+        let estimate = try #require(ledger.estimate(currentWeekDayKeys: ["2026-07-14"]))
+        // Only the child delta is priced, now at the September standard rates.
+        #expect(abs(estimate.lifetimeUSD - 5.275_3984) < 0.000_001)
     }
 
     @Test
     func knownJamesAndHypatiaDeltasMatchExpectedCosts() throws {
-        let james = try #require(SessionAPICostEstimator.estimatedUSD(
-            model: "gpt-5.6-sol",
+        // These are historical July estimates. Their captured prices must stay
+        // explicit when the current catalog changes.
+        let historicalPrice = APIModelPrice(
+            version: "2026-07-13-standard", displayName: "GPT-5.6 Sol",
+            inputPerMillion: 5, cachedInputPerMillion: 0.5, outputPerMillion: 30
+        )
+        let james = SessionAPICostEstimator.estimatedUSD(price: historicalPrice, counts: TokenCounts(
             inputTokens: 7_211_406,
             cachedInputTokens: 6_634_496,
-            outputTokens: 15_698
+            outputTokens: 15_698,
+            totalTokens: 7_227_104
         ))
-        let hypatia = try #require(SessionAPICostEstimator.estimatedUSD(
-            model: "gpt-5.6-sol",
+        let hypatia = SessionAPICostEstimator.estimatedUSD(price: historicalPrice, counts: TokenCounts(
             inputTokens: 51_233_047,
             cachedInputTokens: 47_064_832,
-            outputTokens: 171_102
+            outputTokens: 171_102,
+            totalTokens: 51_404_149
         ))
 
         #expect(abs(james - 6.672_738) < 0.000_001)

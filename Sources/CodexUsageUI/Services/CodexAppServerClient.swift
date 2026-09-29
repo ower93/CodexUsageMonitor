@@ -157,14 +157,34 @@ final class CodexAppServerClient: @unchecked Sendable {
         return activeSession
     }
 
-    private static func resolveCodexExecutable() throws -> URL {
-        let candidates = [
-            "/Applications/Codex.app/Contents/Resources/codex",
-            "/opt/homebrew/bin/codex",
-            "/usr/local/bin/codex"
+    static var defaultCodexExecutableCandidates: [URL] {
+        let applications = [
+            URL(fileURLWithPath: "/Applications/Codex.app", isDirectory: true),
+            FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Applications/Codex.app", isDirectory: true)
         ]
-        if let path = candidates.first(where: FileManager.default.isExecutableFile(atPath:)) {
-            return URL(fileURLWithPath: path)
+        return applications.flatMap { app in
+            [
+                app.appendingPathComponent(
+                    "Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"
+                ),
+                app.appendingPathComponent("Contents/Resources/codex")
+            ]
+        } + [
+            URL(fileURLWithPath: "/opt/homebrew/bin/codex"),
+            URL(fileURLWithPath: "/usr/local/bin/codex")
+        ]
+    }
+
+    static func resolveCodexExecutable(candidates: [URL]? = nil) throws -> URL {
+        let fileManager = FileManager.default
+        for candidate in candidates ?? defaultCodexExecutableCandidates {
+            var isDirectory: ObjCBool = false
+            guard fileManager.fileExists(atPath: candidate.path, isDirectory: &isDirectory),
+                  !isDirectory.boolValue,
+                  fileManager.isExecutableFile(atPath: candidate.path)
+            else { continue }
+            return candidate
         }
         throw CodexUsageClientError.executableNotFound
     }
@@ -225,7 +245,7 @@ private final class CodexAppServerSession: @unchecked Sendable {
                         "clientInfo": [
                             "name": "codex-usage-monitor",
                             "title": "Codex Usage Monitor",
-                            "version": "1.2.1"
+                            "version": "1.2.4"
                         ],
                         "capabilities": [
                             "experimentalApi": true,

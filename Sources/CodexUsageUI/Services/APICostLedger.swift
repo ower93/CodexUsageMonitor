@@ -1,42 +1,55 @@
 import Foundation
 
 struct APIModelPrice: Codable, Equatable, Sendable {
+    static let pricingSourceURL = "https://developers.openai.com/api/docs/pricing"
+
     let version: String
     let displayName: String
     let inputPerMillion: Double
     let cachedInputPerMillion: Double
     let outputPerMillion: Double
 
-    // Standard API prices active when this app version was released.
+    // Standard short-context API prices, verified 2026-09-07 at pricingSourceURL.
+    // Cache-write premiums, long-context and service-tier surcharges are not
+    // inferred from the cumulative input/cached-input/output counters.
     // When a price changes, keep the old version in existing ledger records and
     // return a new version here. Never edit persisted records in place.
     static func price(for rawModel: String) -> APIModelPrice? {
-        let model = rawModel.lowercased()
+        let model = rawModel.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if isGPT6Astra(model) {
+            return APIModelPrice(
+                version: "2026-09-07-standard",
+                displayName: "GPT-6 Astra",
+                inputPerMillion: 10,
+                cachedInputPerMillion: 1,
+                outputPerMillion: 50
+            )
+        }
         if model == "gpt-5.6-sol" || model.hasPrefix("gpt-5.6-sol-") {
             return APIModelPrice(
-                version: "2026-07-13-standard",
+                version: "2026-09-07-standard",
                 displayName: "GPT-5.6 Sol",
-                inputPerMillion: 5,
-                cachedInputPerMillion: 0.5,
-                outputPerMillion: 30
+                inputPerMillion: 4,
+                cachedInputPerMillion: 0.4,
+                outputPerMillion: 20
             )
         }
         if model == "gpt-5.6-terra" || model.hasPrefix("gpt-5.6-terra-") {
             return APIModelPrice(
-                version: "2026-07-13-standard",
+                version: "2026-09-07-standard",
                 displayName: "GPT-5.6 Terra",
-                inputPerMillion: 2.5,
-                cachedInputPerMillion: 0.25,
-                outputPerMillion: 15
+                inputPerMillion: 2,
+                cachedInputPerMillion: 0.2,
+                outputPerMillion: 12
             )
         }
         if model == "gpt-5.6-luna" || model.hasPrefix("gpt-5.6-luna-") {
             return APIModelPrice(
-                version: "2026-07-13-standard",
+                version: "2026-09-07-standard",
                 displayName: "GPT-5.6 Luna",
-                inputPerMillion: 1,
-                cachedInputPerMillion: 0.1,
-                outputPerMillion: 6
+                inputPerMillion: 0.2,
+                cachedInputPerMillion: 0.02,
+                outputPerMillion: 1.2
             )
         }
         if model == "gpt-5.5" || model.hasPrefix("gpt-5.5-") {
@@ -58,6 +71,16 @@ struct APIModelPrice: Codable, Equatable, Sendable {
             )
         }
         return nil
+    }
+
+    static func isGPT6Astra(_ rawModel: String) -> Bool {
+        let model = rawModel.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        // Accept the canonical ID and dated snapshots, not unknown Astra tiers
+        // or a future GPT-6 variant whose price may differ.
+        return model == "gpt-6-astra" || model.range(
+            of: #"^gpt-6-astra-[0-9]{4}-[0-9]{2}-[0-9]{2}$"#,
+            options: .regularExpression
+        ) != nil
     }
 }
 
@@ -153,6 +176,39 @@ struct APICostLedger: Codable, Sendable {
 
     mutating func advanceRevision() {
         revision = revision == UInt64.max ? 1 : revision + 1
+    }
+
+    var hasUnpricedGPT6Usage: Bool {
+        records.contains { $0.price == nil && APIModelPrice.isGPT6Astra($0.model) }
+    }
+
+    @discardableResult
+    mutating func backfillUnpricedGPT6Usage(at date: Date) -> Int {
+        let note = PricingBackfill(
+            appliedAt: ISO8601DateFormatter().string(from: date),
+            reason: "newly-supported-gpt-6-astra",
+            sourceURL: APIModelPrice.pricingSourceURL
+        )
+        var count = 0
+        for index in records.indices {
+            let record = records[index]
+            guard record.price == nil,
+                  APIModelPrice.isGPT6Astra(record.model),
+                  let price = APIModelPrice.price(for: record.model)
+            else { continue }
+
+            records[index] = Record(
+                sessionID: record.sessionID,
+                usageDay: record.usageDay,
+                model: record.model,
+                counts: record.counts,
+                price: price,
+                usd: SessionAPICostEstimator.estimatedUSD(price: price, counts: record.counts),
+                pricingBackfill: note
+            )
+            count += 1
+        }
+        return count
     }
 
     @discardableResult
@@ -302,6 +358,7 @@ struct APICostLedger: Codable, Sendable {
                 && $0.usageDay == usageDay
                 && $0.model == model
                 && $0.price == price
+                && $0.pricingBackfill == nil
         }) {
             records[index].add(counts, usd: usd)
         } else {
@@ -311,13 +368,14 @@ struct APICostLedger: Codable, Sendable {
                 model: model,
                 counts: counts,
                 price: price,
-                usd: usd
+                usd: usd,
+                pricingBackfill: nil
             ))
         }
     }
 
-    func estimate(sevenDayKeys: Set<String>) -> CodexAPICostEstimate? {
-        var sevenDayUSD = 0.0
+    func estimate(currentWeekDayKeys: Set<String>) -> CodexAPICostEstimate? {
+        var currentWeekUSD = 0.0
         var lifetimeUSD = 0.0
         var pricedTokens: Int64 = 0
         var observedTokens: Int64 = 0
@@ -326,8 +384,8 @@ struct APICostLedger: Codable, Sendable {
         for record in records {
             observedTokens += record.counts.totalTokens
             lifetimeUSD += record.usd
-            if sevenDayKeys.contains(record.usageDay) {
-                sevenDayUSD += record.usd
+            if currentWeekDayKeys.contains(record.usageDay) {
+                currentWeekUSD += record.usd
             }
             if let price = record.price {
                 pricedTokens += record.counts.totalTokens
@@ -337,7 +395,7 @@ struct APICostLedger: Codable, Sendable {
 
         guard observedTokens > 0 else { return nil }
         return CodexAPICostEstimate(
-            sevenDayUSD: sevenDayUSD,
+            currentWeekUSD: currentWeekUSD,
             lifetimeUSD: lifetimeUSD,
             pricedTokens: pricedTokens,
             observedTokens: observedTokens,
@@ -430,11 +488,20 @@ extension APICostLedger {
         private(set) var counts: TokenCounts
         let price: APIModelPrice?
         private(set) var usd: Double
+        // Optional so existing schema-3 records decode unchanged. Backfilled
+        // history stays separate from normally observed tokens on the same day.
+        let pricingBackfill: PricingBackfill?
 
         mutating func add(_ delta: TokenCounts, usd additionalUSD: Double) {
             counts.add(delta)
             usd += additionalUSD
         }
+    }
+
+    struct PricingBackfill: Codable, Equatable, Sendable {
+        let appliedAt: String
+        let reason: String
+        let sourceURL: String
     }
 }
 
@@ -579,6 +646,22 @@ struct APICostLedgerStore: Sendable {
         let migrationBackupURL = url.deletingLastPathComponent().appendingPathComponent(backupName)
         try fileManager.copyItem(at: url, to: migrationBackupURL)
         return migrationBackupURL
+    }
+
+    @discardableResult
+    func backupBeforeGPT6Backfill(_ ledger: APICostLedger, at date: Date) throws -> URL {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        let name = "token-cost-ledger-before-gpt6-backfill-\(formatter.string(from: date))-\(UUID().uuidString).json"
+        let destination = url.deletingLastPathComponent().appendingPathComponent(name)
+        // Encode the successfully loaded ledger, including when the main file
+        // was corrupt and load() recovered its valid backup.
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(ledger).write(to: destination, options: .atomic)
+        return destination
     }
 
     private var backupURL: URL {

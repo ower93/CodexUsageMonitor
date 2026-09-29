@@ -22,7 +22,7 @@ struct RecentTask: Identifiable, Codable, Sendable {
 }
 
 struct APICostEstimateSnapshot: Codable, Sendable {
-    let sevenDayUSD: Double
+    let currentWeekUSD: Double
     let lifetimeUSD: Double
     let coveragePercent: Int
     let modelNames: [String]
@@ -88,7 +88,7 @@ struct UsageSnapshot: Codable, Sendable {
                 )
             ],
             apiCostEstimate: APICostEstimateSnapshot(
-                sevenDayUSD: 186.42,
+                currentWeekUSD: 186.42,
                 lifetimeUSD: 1_980,
                 coveragePercent: 94,
                 modelNames: ["GPT-5.5", "GPT-5.6 Sol"]

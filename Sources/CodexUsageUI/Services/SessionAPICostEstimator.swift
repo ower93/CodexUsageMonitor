@@ -5,6 +5,7 @@ enum SessionAPICostEstimator {
 
     static func estimate(
         now: Date = Date(),
+        calendar: Calendar = .current,
         ledgerURL: URL = APICostLedgerStore.defaultURL,
         sessionRoots: [URL]? = nil
     ) -> CodexAPICostEstimate? {
@@ -20,7 +21,6 @@ enum SessionAPICostEstimator {
             ]
         }
         let allFiles = allSessionFiles(in: roots)
-        let calendar = Calendar.current
 
         ledgerLock.lock()
         defer { ledgerLock.unlock() }
@@ -38,6 +38,12 @@ enum SessionAPICostEstimator {
                 didMigrateLedger = true
             }
 
+            var didBackfillPricing = false
+            if ledger.hasUnpricedGPT6Usage {
+                try store.backupBeforeGPT6Backfill(ledger, at: now)
+                didBackfillPricing = ledger.backfillUnpricedGPT6Usage(at: now) > 0
+            }
+
             let loadedIndex = indexStore.load()
             let indexMatchesLedger = !didMigrateLedger
                 && loadedIndex.ledgerRevision == ledger.revision
@@ -45,7 +51,7 @@ enum SessionAPICostEstimator {
                 ? loadedIndex
                 : SessionFileIndex(ledgerRevision: ledger.revision)
             var observations: [IndexedSessionObservation] = []
-            var didChange = didMigrateLedger
+            var didChange = didMigrateLedger || didBackfillPricing
             var indexDidChange = !indexMatchesLedger
 
             for url in allFiles {
@@ -286,7 +292,7 @@ enum SessionAPICostEstimator {
                 // successfully persisted cost estimate.
                 try? indexStore.save(nextIndex)
             }
-            return ledger.estimate(sevenDayKeys: sevenDayKeys(now: now, calendar: calendar))
+            return ledger.estimate(currentWeekDayKeys: currentWeekDayKeys(now: now, calendar: calendar))
         } catch {
             // Do not recreate or reprice history when the durable ledger cannot
             // be read or written. The rest of the usage panel can still refresh.
@@ -341,9 +347,13 @@ enum SessionAPICostEstimator {
         return Array(filesByName.values)
     }
 
-    private static func sevenDayKeys(now: Date, calendar: Calendar) -> Set<String> {
+    static func currentWeekDayKeys(now: Date, calendar: Calendar) -> Set<String> {
         let startOfToday = calendar.startOfDay(for: now)
-        return Set((0..<7).compactMap { dayOffset in
+        // Weekdays are Sunday = 1, Monday = 2. Do not use the locale's
+        // firstWeekday: the cost card always starts on Monday at local 00:00.
+        // Add calendar days, not 24-hour intervals, to preserve DST boundaries.
+        let daysSinceMonday = (calendar.component(.weekday, from: startOfToday) + 5) % 7
+        return Set((0...daysSinceMonday).compactMap { dayOffset in
             calendar.date(byAdding: .day, value: -dayOffset, to: startOfToday).map {
                 usageDay(for: $0, calendar: calendar)
             }

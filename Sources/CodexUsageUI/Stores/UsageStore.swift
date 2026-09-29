@@ -114,7 +114,7 @@ public final class UsageStore: ObservableObject {
             snapshot = UsageSnapshot(live: liveUsage, language: language)
         } else {
             snapshot.apiCostEstimate = APICostEstimateSnapshot(
-                sevenDayUSD: estimate.sevenDayUSD,
+                currentWeekUSD: estimate.currentWeekUSD,
                 lifetimeUSD: estimate.lifetimeUSD,
                 coveragePercent: estimate.observedTokens > 0
                     ? Int((Double(estimate.pricedTokens)

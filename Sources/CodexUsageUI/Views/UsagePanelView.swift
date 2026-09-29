@@ -138,19 +138,14 @@ private struct APICostEstimateCard: View {
     let language: AppLanguage
     let tuning: GlassTuning
 
-    private var sevenDayValue: String {
+    private var currentWeekValue: String {
         guard let estimate else { return "—" }
-        return Self.currency(estimate.sevenDayUSD)
+        return Self.currency(estimate.currentWeekUSD)
     }
 
     private var lifetimeValue: String {
         guard let value = estimate?.lifetimeUSD else { return "—" }
         return Self.currency(value)
-    }
-
-    private var modelText: String {
-        guard let names = estimate?.modelNames, !names.isEmpty else { return language.noPricedModel }
-        return names.joined(separator: " · ")
     }
 
     var body: some View {
@@ -167,13 +162,14 @@ private struct APICostEstimateCard: View {
             }
 
             HStack(alignment: .firstTextBaseline) {
-                Text(sevenDayValue)
+                Text(currentWeekValue)
                     .font(UsageDesign.font(25, weight: .bold, language: language))
                     .foregroundStyle(UsageDesign.blue)
                     .monospacedDigit()
-                Text(language.metricSevenDays)
+                Text(language.metricCurrentWeek)
                     .font(UsageDesign.font(11.5, weight: .medium, language: language))
                     .foregroundStyle(.secondary)
+                    .help(language.currentWeekCostHint)
 
                 Spacer()
 
@@ -191,10 +187,11 @@ private struct APICostEstimateCard: View {
                 .opacity(0.32)
 
             HStack(spacing: 6) {
-                Image(systemName: "cpu")
+                Image(systemName: "calendar")
                     .font(.system(size: 11, weight: .medium))
-                Text(modelText)
+                Text(language.currentWeekStart)
                     .lineLimit(1)
+                    .help(language.currentWeekCostHint)
                 Spacer(minLength: 8)
                 Text(language.pricedCoverage(estimate?.coveragePercent ?? 0))
                     .monospacedDigit()
