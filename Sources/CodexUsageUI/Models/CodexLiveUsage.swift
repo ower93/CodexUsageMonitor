@@ -7,10 +7,21 @@ struct CodexLiveUsage: Sendable {
     let dailyUsage: [CodexDailyUsage]
     let recentThreads: [CodexThreadUsage]
     let apiCostEstimate: CodexAPICostEstimate?
+
+    func replacingAPICostEstimate(_ estimate: CodexAPICostEstimate?) -> CodexLiveUsage {
+        CodexLiveUsage(
+            rateLimits: rateLimits,
+            availableResetCount: availableResetCount,
+            lifetimeTokens: lifetimeTokens,
+            dailyUsage: dailyUsage,
+            recentThreads: recentThreads,
+            apiCostEstimate: estimate
+        )
+    }
 }
 
 struct CodexAPICostEstimate: Sendable {
-    let sevenDayUSD: Double
+    let currentWeekUSD: Double
     let lifetimeUSD: Double
     let pricedTokens: Int64
     let observedTokens: Int64
@@ -98,7 +109,7 @@ extension UsageSnapshot {
             recentTasks: recentTasks,
             apiCostEstimate: live.apiCostEstimate.map { estimate in
                 APICostEstimateSnapshot(
-                    sevenDayUSD: estimate.sevenDayUSD,
+                    currentWeekUSD: estimate.currentWeekUSD,
                     lifetimeUSD: estimate.lifetimeUSD,
                     coveragePercent: estimate.observedTokens > 0
                         ? Int((Double(estimate.pricedTokens) / Double(estimate.observedTokens) * 100).rounded())

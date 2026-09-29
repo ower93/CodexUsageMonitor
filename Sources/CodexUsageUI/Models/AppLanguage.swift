@@ -168,6 +168,27 @@ public enum AppLanguage: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
+    var metricCurrentWeek: String {
+        switch self {
+        case .simplifiedChinese: "本周"
+        case .english: "This Week"
+        }
+    }
+
+    var currentWeekStart: String {
+        switch self {
+        case .simplifiedChinese: "周一 00:00 起"
+        case .english: "Since Mon 00:00"
+        }
+    }
+
+    var currentWeekCostHint: String {
+        switch self {
+        case .simplifiedChinese: "按本机时区，从本周一 00:00 起累计的估算费用"
+        case .english: "Estimated cost since Monday 00:00 in your Mac's local time zone"
+        }
+    }
+
     var previewCurrentMetric: String {
         switch self {
         case .simplifiedChinese: "本次任务"
@@ -233,8 +254,8 @@ public enum AppLanguage: String, CaseIterable, Identifiable, Sendable {
 
     var costDisclaimer: String {
         switch self {
-        case .simplifiedChinese: "按输入 / 缓存输入 / 输出 token 分别估算，不含税费与长上下文加价"
-        case .english: "Token types priced separately; excludes tax and surcharges."
+        case .simplifiedChinese: "按标准短上下文价估算，不含缓存写入溢价、其他加价与税费"
+        case .english: "Standard short-context rates; excludes cache-write premiums, surcharges and tax."
         }
     }
 

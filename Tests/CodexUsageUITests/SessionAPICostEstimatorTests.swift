@@ -26,7 +26,7 @@ struct SessionAPICostEstimatorTests {
             outputTokens: 0
         ))
 
-        #expect(abs(usd - 0.50) < 0.000_001)
+        #expect(abs(usd - 0.40) < 0.000_001)
     }
 
     @Test
@@ -92,7 +92,7 @@ struct SessionAPICostEstimatorTests {
         )
         #expect(!changedWithoutNewTokens)
         let unchanged = try #require(ledger.estimate(
-            sevenDayKeys: ["2026-07-13", "2026-07-14"]
+            currentWeekDayKeys: ["2026-07-13", "2026-07-14"]
         ))
         #expect(abs(unchanged.lifetimeUSD - 2.64) < 0.000_001)
 
@@ -105,7 +105,7 @@ struct SessionAPICostEstimatorTests {
         )
         #expect(recordedIncrement)
         let updated = try #require(ledger.estimate(
-            sevenDayKeys: ["2026-07-13", "2026-07-14"]
+            currentWeekDayKeys: ["2026-07-13", "2026-07-14"]
         ))
 
         // $2.64 at the old price + $7.28 for only the new token delta.
@@ -154,7 +154,7 @@ struct SessionAPICostEstimatorTests {
         )
 
         let estimate = try #require(ledger.estimate(
-            sevenDayKeys: ["2026-07-13", "2026-07-14"]
+            currentWeekDayKeys: ["2026-07-13", "2026-07-14"]
         ))
         #expect(estimate.observedTokens == 2_000)
         #expect(estimate.pricedTokens == 1_000)
@@ -208,7 +208,7 @@ struct SessionAPICostEstimatorTests {
         #expect(recordedRecovery)
 
         let estimate = try #require(ledger.estimate(
-            sevenDayKeys: ["2026-07-13", "2026-07-14"]
+            currentWeekDayKeys: ["2026-07-13", "2026-07-14"]
         ))
         #expect(estimate.observedTokens == 1_200)
         #expect(abs(estimate.lifetimeUSD - 0.0012) < 0.000_001)
@@ -247,12 +247,181 @@ struct SessionAPICostEstimatorTests {
 
         try store.save(ledger)
         let restored = try store.load()
-        let estimate = try #require(restored.estimate(sevenDayKeys: ["2026-07-14"]))
+        let estimate = try #require(restored.estimate(currentWeekDayKeys: ["2026-07-14"]))
         let json = try String(contentsOf: store.url, encoding: .utf8)
 
         #expect(abs(estimate.lifetimeUSD - 3) < 0.000_001)
         #expect(json.contains("persisted-price"))
         #expect(json.contains("inputPerMillion"))
+    }
+
+    @Test
+    func schemaMigrationPreservesFrozenPriceRecords() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = APICostLedgerStore(
+            url: directory.appendingPathComponent("token-cost-ledger.json")
+        )
+        let frozenPrice = APIModelPrice(
+            version: "historical-frozen-price",
+            displayName: "Historical Model",
+            inputPerMillion: 2,
+            cachedInputPerMillion: 0.2,
+            outputPerMillion: 10
+        )
+        var ledger = APICostLedger()
+        ledger.observe(
+            sessionID: "00000000-0000-0000-0000-000000000098",
+            summary: SessionTokenSummary(
+                model: "gpt-5.5",
+                inputTokens: 1_000_000,
+                cachedInputTokens: 0,
+                outputTokens: 0,
+                totalTokens: 1_000_000
+            ),
+            initialUsageDay: "2026-07-14",
+            incrementalUsageDay: "2026-07-14",
+            price: frozenPrice
+        )
+        try store.save(ledger)
+
+        let encoded = try String(contentsOf: store.url, encoding: .utf8)
+        let schemaTwo = encoded.replacingOccurrences(
+            of: #""schemaVersion" : 3"#,
+            with: #""schemaVersion" : 2"#
+        )
+        #expect(schemaTwo != encoded)
+        try Data(schemaTwo.utf8).write(to: store.url)
+
+        let estimate = try #require(SessionAPICostEstimator.estimate(
+            now: Date(timeIntervalSince1970: 1_774_512_000),
+            ledgerURL: store.url,
+            sessionRoots: []
+        ))
+        let migrated = try store.load()
+
+        #expect(!migrated.requiresRebuild)
+        #expect(abs(estimate.lifetimeUSD - 2) < 0.000_001)
+        #expect(migrated.records.count == 1)
+        #expect(migrated.records.first?.price?.version == "historical-frozen-price")
+        #expect(abs((migrated.records.first?.usd ?? 0) - 2) < 0.000_001)
+    }
+
+    @Test
+    func schemaMigrationRebuildsFilenameKeyedRecordsAtTheirFrozenPrice() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let sessionRoot = directory.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: sessionRoot,
+            withIntermediateDirectories: true
+        )
+        let sessionID = "00000000-0000-0000-0000-000000000099"
+        let legacyKey = "rollout-2026-07-14T05-00-00-\(sessionID).jsonl"
+        let sessionURL = sessionRoot.appendingPathComponent(legacyKey)
+        try writeJSONLines([
+            sessionMeta(
+                id: sessionID,
+                timestamp: "2026-07-14T05:00:00.000Z"
+            ),
+            turnContext(
+                model: "gpt-5.5",
+                timestamp: "2026-07-14T05:00:01.000Z"
+            ),
+            tokenCount(
+                input: 1_000_000,
+                cached: 0,
+                output: 0,
+                total: 1_000_000,
+                timestamp: "2026-07-14T05:01:00.000Z"
+            )
+        ], to: sessionURL)
+
+        let ledgerURL = directory.appendingPathComponent("token-cost-ledger.json")
+        let store = APICostLedgerStore(url: ledgerURL)
+        let frozenPrice = APIModelPrice(
+            version: "historical-filename-price",
+            displayName: "Historical GPT-5.5",
+            inputPerMillion: 2,
+            cachedInputPerMillion: 0.2,
+            outputPerMillion: 10
+        )
+        var ledger = APICostLedger()
+        ledger.observe(
+            sessionID: legacyKey,
+            summary: SessionTokenSummary(
+                model: "gpt-5.5",
+                inputTokens: 1_000_000,
+                cachedInputTokens: 0,
+                outputTokens: 0,
+                totalTokens: 1_000_000
+            ),
+            initialUsageDay: "2026-07-14",
+            incrementalUsageDay: "2026-07-14",
+            price: frozenPrice
+        )
+        try store.save(ledger)
+        let encoded = try String(contentsOf: ledgerURL, encoding: .utf8)
+        try Data(encoded.replacingOccurrences(
+            of: #""schemaVersion" : 3"#,
+            with: #""schemaVersion" : 2"#
+        ).utf8).write(to: ledgerURL)
+
+        let estimate = try #require(SessionAPICostEstimator.estimate(
+            now: Date(timeIntervalSince1970: 1_774_512_000),
+            ledgerURL: ledgerURL,
+            sessionRoots: [sessionRoot]
+        ))
+        let migrated = try store.load()
+
+        #expect(migrated.records.count == 1)
+        #expect(migrated.records.first?.sessionID == sessionID)
+        #expect(migrated.records.first?.price?.version == "historical-filename-price")
+        #expect(abs(estimate.lifetimeUSD - 2) < 0.000_001)
+    }
+
+    @Test
+    func existingSchemaThreeLedgerWithoutRevisionRemainsDecodable() throws {
+        let price = APIModelPrice(
+            version: "existing-price",
+            displayName: "Existing Model",
+            inputPerMillion: 3,
+            cachedInputPerMillion: 0.3,
+            outputPerMillion: 18
+        )
+        var ledger = APICostLedger()
+        ledger.observe(
+            sessionID: "existing-schema-three",
+            summary: SessionTokenSummary(
+                model: "existing-model",
+                inputTokens: 1_000,
+                cachedInputTokens: 0,
+                outputTokens: 0,
+                totalTokens: 1_000
+            ),
+            initialUsageDay: "2026-07-14",
+            incrementalUsageDay: "2026-07-14",
+            price: price
+        )
+        let encoded = try JSONEncoder().encode(ledger)
+        var object = try #require(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
+        object.removeValue(forKey: "revision")
+        let legacySchemaThree = try JSONSerialization.data(withJSONObject: object)
+
+        let decoded = try JSONDecoder().decode(
+            APICostLedger.self,
+            from: legacySchemaThree
+        )
+
+        #expect(decoded.revision == 0)
+        #expect(!decoded.requiresRebuild)
+        #expect(decoded.records.count == 1)
+        #expect(decoded.records.first?.price?.version == "existing-price")
+        #expect(abs((decoded.records.first?.usd ?? 0) - 0.003) < 0.000_001)
     }
 
     @Test
@@ -336,23 +505,30 @@ struct SessionAPICostEstimatorTests {
             history: history,
             inheritedBaseline: baseline
         )
-        let estimate = try #require(ledger.estimate(sevenDayKeys: ["2026-07-14"]))
-        #expect(abs(estimate.lifetimeUSD - 6.672_738) < 0.000_001)
+        let estimate = try #require(ledger.estimate(currentWeekDayKeys: ["2026-07-14"]))
+        // Only the child delta is priced, now at the September standard rates.
+        #expect(abs(estimate.lifetimeUSD - 5.275_3984) < 0.000_001)
     }
 
     @Test
     func knownJamesAndHypatiaDeltasMatchExpectedCosts() throws {
-        let james = try #require(SessionAPICostEstimator.estimatedUSD(
-            model: "gpt-5.6-sol",
+        // These are historical July estimates. Their captured prices must stay
+        // explicit when the current catalog changes.
+        let historicalPrice = APIModelPrice(
+            version: "2026-07-13-standard", displayName: "GPT-5.6 Sol",
+            inputPerMillion: 5, cachedInputPerMillion: 0.5, outputPerMillion: 30
+        )
+        let james = SessionAPICostEstimator.estimatedUSD(price: historicalPrice, counts: TokenCounts(
             inputTokens: 7_211_406,
             cachedInputTokens: 6_634_496,
-            outputTokens: 15_698
+            outputTokens: 15_698,
+            totalTokens: 7_227_104
         ))
-        let hypatia = try #require(SessionAPICostEstimator.estimatedUSD(
-            model: "gpt-5.6-sol",
+        let hypatia = SessionAPICostEstimator.estimatedUSD(price: historicalPrice, counts: TokenCounts(
             inputTokens: 51_233_047,
             cachedInputTokens: 47_064_832,
-            outputTokens: 171_102
+            outputTokens: 171_102,
+            totalTokens: 51_404_149
         ))
 
         #expect(abs(james - 6.672_738) < 0.000_001)
@@ -360,7 +536,35 @@ struct SessionAPICostEstimatorTests {
     }
 
     @Test
-    func backsUpSchemaOneLedgerBeforeRebuild() throws {
+    func marksDescriptorUnresolvedWhenSessionMetadataCannotBeRead() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        let sessionID = "00000000-0000-0000-0000-000000000003"
+        let url = directory.appendingPathComponent(
+            "rollout-2026-07-14T05-00-00-\(sessionID).jsonl"
+        )
+        try writeJSONLines([
+            turnContext(model: "gpt-5.6-sol", timestamp: "2026-07-14T05:00:01.000Z"),
+            tokenCount(
+                input: 1_000_000,
+                cached: 900_000,
+                output: 10_000,
+                total: 1_010_000,
+                timestamp: "2026-07-14T05:01:00.000Z"
+            )
+        ], to: url)
+
+        let descriptor = SessionUsageLogReader.descriptor(for: url)
+
+        #expect(descriptor.sessionID == sessionID)
+        #expect(!descriptor.metadataResolved)
+    }
+
+    @Test
+    func backsUpSchemaTwoLedgerBeforeRebuild() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -370,12 +574,12 @@ struct SessionAPICostEstimatorTests {
             url: directory.appendingPathComponent("token-cost-ledger.json")
         )
         let encoded = try JSONEncoder().encode(APICostLedger())
-        let schemaTwo = try #require(String(data: encoded, encoding: .utf8))
-        let schemaOne = schemaTwo.replacingOccurrences(
-            of: #""schemaVersion":2"#,
-            with: #""schemaVersion":1"#
+        let schemaThree = try #require(String(data: encoded, encoding: .utf8))
+        let schemaTwo = schemaThree.replacingOccurrences(
+            of: #""schemaVersion":3"#,
+            with: #""schemaVersion":2"#
         )
-        try Data(schemaOne.utf8).write(to: store.url)
+        try Data(schemaTwo.utf8).write(to: store.url)
 
         let legacy = try store.load()
         let savedBackupURL = try store.backupLegacyLedger(
@@ -385,7 +589,7 @@ struct SessionAPICostEstimatorTests {
 
         #expect(legacy.requiresRebuild)
         #expect(FileManager.default.fileExists(atPath: backupURL.path))
-        #expect(backupURL.lastPathComponent.hasPrefix("token-cost-ledger-v1-backup-"))
+        #expect(backupURL.lastPathComponent.hasPrefix("token-cost-ledger-v2-backup-"))
     }
 }
 

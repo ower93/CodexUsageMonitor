@@ -5,18 +5,21 @@ import Combine
 @MainActor
 final class StatusBarController: NSObject {
     private let store: UsageStore
+    private let refresh: () -> Void
     private let statusItem: NSStatusItem
     private var panelController: TransparentUsagePanelController!
     private var storeObserver: AnyCancellable?
 
-    init(store: UsageStore) {
+    init(store: UsageStore, refresh: @escaping () -> Void) {
         self.store = store
+        self.refresh = refresh
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         super.init()
 
         panelController = TransparentUsagePanelController(
             store: store,
             statusItem: statusItem,
+            refresh: refresh,
             visibilityDidChange: { [weak self] isVisible in
                 self?.statusItem.button?.highlight(isVisible)
             }
@@ -97,7 +100,7 @@ final class StatusBarController: NSObject {
 
     @objc
     private func refreshUsage() {
-        Task { await store.refresh() }
+        refresh()
     }
 
     @objc

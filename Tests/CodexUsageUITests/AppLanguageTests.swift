@@ -41,4 +41,14 @@ struct AppLanguageTests {
         #expect(snapshot.metrics.map(\.label) == ["Current Task", "Last 7 Days", "Lifetime"])
         #expect(snapshot.recentTasks.first?.tokenText == "Hidden")
     }
+
+    @Test
+    func localizesCostWeekWithoutChangingAccountSevenDayLabels() {
+        #expect(AppLanguage.simplifiedChinese.metricCurrentWeek == "本周")
+        #expect(AppLanguage.english.metricCurrentWeek == "This Week")
+        #expect(AppLanguage.simplifiedChinese.currentWeekStart == "周一 00:00 起")
+        #expect(AppLanguage.english.currentWeekStart == "Since Mon 00:00")
+        #expect(AppLanguage.simplifiedChinese.metricSevenDays == "近 7 天")
+        #expect(AppLanguage.english.metricSevenDays == "Last 7 Days")
+    }
 }
