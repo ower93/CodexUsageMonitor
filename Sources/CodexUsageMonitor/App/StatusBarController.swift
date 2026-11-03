@@ -8,11 +8,14 @@ final class StatusBarController: NSObject {
     private let refresh: () -> Void
     private let statusItem: NSStatusItem
     private var panelController: TransparentUsagePanelController!
+    private var analyticsController: AnalyticsWindowController?
     private var storeObserver: AnyCancellable?
+    private let updater: AppUpdateController
 
     init(store: UsageStore, refresh: @escaping () -> Void) {
         self.store = store
         self.refresh = refresh
+        updater = AppUpdateController(enabled: !store.isDemo)
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         super.init()
 
@@ -20,6 +23,7 @@ final class StatusBarController: NSObject {
             store: store,
             statusItem: statusItem,
             refresh: refresh,
+            openAnalytics: { [weak self] in self?.openAnalytics() },
             visibilityDidChange: { [weak self] isVisible in
                 self?.statusItem.button?.highlight(isVisible)
             }
@@ -31,6 +35,8 @@ final class StatusBarController: NSObject {
 
     func tearDown() {
         panelController.tearDown()
+        analyticsController?.close()
+        analyticsController = nil
         storeObserver?.cancel()
         NSStatusBar.system.removeStatusItem(statusItem)
     }
@@ -44,7 +50,7 @@ final class StatusBarController: NSObject {
         image?.isTemplate = true
         button.image = image
         button.imagePosition = .imageLeading
-        button.font = .monospacedDigitSystemFont(ofSize: 13, weight: .semibold)
+        button.font = .monospacedDigitSystemFont(ofSize: 13, weight: .regular)
         button.target = self
         button.action = #selector(handleStatusItemAction)
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
@@ -60,10 +66,10 @@ final class StatusBarController: NSObject {
     }
 
     private func updateStatusButton() {
-        statusItem.button?.title = " \(store.menuPercent)%"
+        statusItem.button?.title = " \(store.menuText)"
         statusItem.button?.toolTip = store.language.appTitle
         statusItem.button?.setAccessibilityLabel(
-            store.language.remainingAccessibilityLabel(percent: store.menuPercent)
+            store.menuPercent.map { store.language.remainingAccessibilityLabel(percent: $0) } ?? store.statusText
         )
     }
 
@@ -85,6 +91,11 @@ final class StatusBarController: NSObject {
         )
         refresh.target = self
         menu.addItem(refresh)
+        let analytics = NSMenuItem(title: store.language == .english ? "Open Analytics…" : "打开用量分析…",
+                                   action: #selector(openAnalytics), keyEquivalent: "a")
+        analytics.target = self
+        menu.addItem(analytics)
+        menu.addItem(updater.menuItem(english: store.language == .english))
         menu.addItem(.separator())
         let quit = NSMenuItem(
             title: store.language.quitApplication,
@@ -101,6 +112,11 @@ final class StatusBarController: NSObject {
     @objc
     private func refreshUsage() {
         refresh()
+    }
+
+    @objc func openAnalytics() {
+        if analyticsController == nil { analyticsController = AnalyticsWindowController(store: store, refresh: refresh) }
+        analyticsController?.show()
     }
 
     @objc

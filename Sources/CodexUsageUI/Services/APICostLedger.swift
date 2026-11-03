@@ -9,68 +9,13 @@ struct APIModelPrice: Codable, Equatable, Sendable {
     let cachedInputPerMillion: Double
     let outputPerMillion: Double
 
-    // Standard short-context API prices, verified 2026-09-07 at pricingSourceURL.
+    // Standard short-context API prices from the validated bundled catalog.
     // Cache-write premiums, long-context and service-tier surcharges are not
     // inferred from the cumulative input/cached-input/output counters.
     // When a price changes, keep the old version in existing ledger records and
     // return a new version here. Never edit persisted records in place.
     static func price(for rawModel: String) -> APIModelPrice? {
-        let model = rawModel.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if isGPT6Astra(model) {
-            return APIModelPrice(
-                version: "2026-09-07-standard",
-                displayName: "GPT-6 Astra",
-                inputPerMillion: 10,
-                cachedInputPerMillion: 1,
-                outputPerMillion: 50
-            )
-        }
-        if model == "gpt-5.6-sol" || model.hasPrefix("gpt-5.6-sol-") {
-            return APIModelPrice(
-                version: "2026-09-07-standard",
-                displayName: "GPT-5.6 Sol",
-                inputPerMillion: 4,
-                cachedInputPerMillion: 0.4,
-                outputPerMillion: 20
-            )
-        }
-        if model == "gpt-5.6-terra" || model.hasPrefix("gpt-5.6-terra-") {
-            return APIModelPrice(
-                version: "2026-09-07-standard",
-                displayName: "GPT-5.6 Terra",
-                inputPerMillion: 2,
-                cachedInputPerMillion: 0.2,
-                outputPerMillion: 12
-            )
-        }
-        if model == "gpt-5.6-luna" || model.hasPrefix("gpt-5.6-luna-") {
-            return APIModelPrice(
-                version: "2026-09-07-standard",
-                displayName: "GPT-5.6 Luna",
-                inputPerMillion: 0.2,
-                cachedInputPerMillion: 0.02,
-                outputPerMillion: 1.2
-            )
-        }
-        if model == "gpt-5.5" || model.hasPrefix("gpt-5.5-") {
-            return APIModelPrice(
-                version: "2026-07-13-standard",
-                displayName: "GPT-5.5",
-                inputPerMillion: 5,
-                cachedInputPerMillion: 0.5,
-                outputPerMillion: 30
-            )
-        }
-        if model == "gpt-5.4" || model.hasPrefix("gpt-5.4-") {
-            return APIModelPrice(
-                version: "2026-07-13-standard",
-                displayName: "GPT-5.4",
-                inputPerMillion: 2.5,
-                cachedInputPerMillion: 0.25,
-                outputPerMillion: 15
-            )
-        }
-        return nil
+        PricingCatalogStore.shared.catalog?.price(for: rawModel)
     }
 
     static func isGPT6Astra(_ rawModel: String) -> Bool {
@@ -179,7 +124,7 @@ struct APICostLedger: Codable, Sendable {
     }
 
     var hasUnpricedGPT6Usage: Bool {
-        records.contains { $0.price == nil && APIModelPrice.isGPT6Astra($0.model) }
+        records.contains { $0.price == nil && $0.accountingNote == nil && $0.counts.accountingIssue == nil && APIModelPrice.isGPT6Astra($0.model) }
     }
 
     @discardableResult
@@ -193,6 +138,8 @@ struct APICostLedger: Codable, Sendable {
         for index in records.indices {
             let record = records[index]
             guard record.price == nil,
+                  record.accountingNote == nil,
+                  record.counts.accountingIssue == nil,
                   APIModelPrice.isGPT6Astra(record.model),
                   let price = APIModelPrice.price(for: record.model)
             else { continue }
@@ -285,16 +232,17 @@ struct APICostLedger: Codable, Sendable {
             counts: current,
             inheritedBaseline: inheritedBaseline ?? previousCheckpoint.inheritedBaseline
         )
-        for slice in slices where slice.counts.totalTokens > 0 {
+        for slice in slices where slice.counts.totalTokens > 0 || slice.accountingNote != nil {
             addRecord(
                 sessionID: sessionID,
                 usageDay: slice.usageDay,
                 model: slice.model,
                 counts: slice.counts,
-                price: APIModelPrice.price(for: slice.model)
+                price: APIModelPrice.price(for: slice.model),
+                accountingNote: slice.accountingNote
             )
         }
-        return expectedDelta.totalTokens > 0
+        return expectedDelta.totalTokens > 0 || expectedDelta.cachedInputTokens > 0
     }
 
     @discardableResult
@@ -311,7 +259,7 @@ struct APICostLedger: Codable, Sendable {
             inheritedBaseline: inheritedBaseline
         )
 
-        for slice in history.slices where slice.counts.totalTokens > 0 {
+        for slice in history.slices where slice.counts.totalTokens > 0 || slice.accountingNote != nil {
             let price = legacyPrices.price(
                 sessionID: sessionID,
                 usageDay: slice.usageDay,
@@ -324,7 +272,8 @@ struct APICostLedger: Codable, Sendable {
                 counts: slice.counts,
                 price: price.wasRecorded
                     ? price.value
-                    : APIModelPrice.price(for: slice.model)
+                    : APIModelPrice.price(for: slice.model),
+                accountingNote: slice.accountingNote
             )
         }
         return true
@@ -347,9 +296,12 @@ struct APICostLedger: Codable, Sendable {
         usageDay: String,
         model: String,
         counts: TokenCounts,
-        price: APIModelPrice?
+        price: APIModelPrice?,
+        accountingNote: String? = nil
     ) {
-        let usd = price.map {
+        let issue = accountingNote ?? counts.accountingIssue
+        let applicablePrice = issue == nil ? price : nil
+        let usd = applicablePrice.map {
             SessionAPICostEstimator.estimatedUSD(price: $0, counts: counts)
         } ?? 0
 
@@ -357,8 +309,9 @@ struct APICostLedger: Codable, Sendable {
             $0.sessionID == sessionID
                 && $0.usageDay == usageDay
                 && $0.model == model
-                && $0.price == price
+                && $0.price == applicablePrice
                 && $0.pricingBackfill == nil
+                && $0.accountingNote == issue
         }) {
             records[index].add(counts, usd: usd)
         } else {
@@ -367,15 +320,17 @@ struct APICostLedger: Codable, Sendable {
                 usageDay: usageDay,
                 model: model,
                 counts: counts,
-                price: price,
+                price: applicablePrice,
                 usd: usd,
-                pricingBackfill: nil
+                pricingBackfill: nil,
+                accountingNote: issue
             ))
         }
     }
 
     func estimate(currentWeekDayKeys: Set<String>) -> CodexAPICostEstimate? {
         var currentWeekUSD = 0.0
+        var currentWeekPricedTokens: Int64 = 0
         var lifetimeUSD = 0.0
         var pricedTokens: Int64 = 0
         var observedTokens: Int64 = 0
@@ -386,6 +341,7 @@ struct APICostLedger: Codable, Sendable {
             lifetimeUSD += record.usd
             if currentWeekDayKeys.contains(record.usageDay) {
                 currentWeekUSD += record.usd
+                if record.price != nil { currentWeekPricedTokens += record.counts.totalTokens }
             }
             if let price = record.price {
                 pricedTokens += record.counts.totalTokens
@@ -402,7 +358,8 @@ struct APICostLedger: Codable, Sendable {
             modelNames: modelTokenTotals
                 .sorted { $0.value > $1.value }
                 .prefix(2)
-                .map(\.key)
+                .map(\.key),
+            currentWeekPricedTokens: currentWeekPricedTokens
         )
     }
 }
@@ -491,6 +448,9 @@ extension APICostLedger {
         // Optional so existing schema-3 records decode unchanged. Backfilled
         // history stays separate from normally observed tokens on the same day.
         let pricingBackfill: PricingBackfill?
+        // Observed but unpriced: retaining raw counters makes ingestion
+        // auditable without inventing a category allocation or repricing old USD.
+        var accountingNote: String? = nil
 
         mutating func add(_ delta: TokenCounts, usd additionalUSD: Double) {
             counts.add(delta)
@@ -505,7 +465,7 @@ extension APICostLedger {
     }
 }
 
-struct TokenCounts: Codable, Equatable, Sendable {
+struct TokenCounts: Codable, Equatable, Hashable, Sendable {
     private(set) var inputTokens: Int64
     private(set) var cachedInputTokens: Int64
     private(set) var outputTokens: Int64
@@ -520,7 +480,7 @@ struct TokenCounts: Codable, Equatable, Sendable {
 
     init(summary: SessionTokenSummary) {
         inputTokens = max(0, summary.inputTokens)
-        cachedInputTokens = min(max(0, summary.cachedInputTokens), inputTokens)
+        cachedInputTokens = max(0, summary.cachedInputTokens)
         outputTokens = max(0, summary.outputTokens)
         totalTokens = max(0, summary.totalTokens)
     }
@@ -532,7 +492,7 @@ struct TokenCounts: Codable, Equatable, Sendable {
         totalTokens: Int64
     ) {
         self.inputTokens = max(0, inputTokens)
-        self.cachedInputTokens = min(max(0, cachedInputTokens), self.inputTokens)
+        self.cachedInputTokens = max(0, cachedInputTokens)
         self.outputTokens = max(0, outputTokens)
         self.totalTokens = max(0, totalTokens)
     }
@@ -575,6 +535,12 @@ struct TokenCounts: Codable, Equatable, Sendable {
         outputTokens += other.outputTokens
         totalTokens += other.totalTokens
     }
+
+    var accountingIssue: String? {
+        if cachedInputTokens > inputTokens { return "inconsistent-cache-delta" }
+        if totalTokens != inputTokens + outputTokens { return "inconsistent-total-delta" }
+        return nil
+    }
 }
 
 struct APICostLedgerStore: Sendable {
@@ -585,6 +551,9 @@ struct APICostLedgerStore: Sendable {
     let url: URL
 
     static var defaultURL: URL {
+        if let directory = ProcessInfo.processInfo.environment["CODEX_USAGE_DATA_DIR"], !directory.isEmpty {
+            return URL(fileURLWithPath: directory, isDirectory: true).appendingPathComponent("token-cost-ledger.json")
+        }
         let fileManager = FileManager.default
         let applicationSupport = fileManager.urls(
             for: .applicationSupportDirectory,

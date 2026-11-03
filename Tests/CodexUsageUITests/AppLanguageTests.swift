@@ -38,8 +38,23 @@ struct AppLanguageTests {
         let snapshot = UsageSnapshot.preview(language: .english)
 
         #expect(snapshot.periods.first?.title == "5-Hour Limit")
-        #expect(snapshot.metrics.map(\.label) == ["Current Task", "Last 7 Days", "Lifetime"])
+        #expect(snapshot.metrics.map(\.label) == ["Latest Chat", "Last 7 Days", "Account Total"])
         #expect(snapshot.recentTasks.first?.tokenText == "Hidden")
+    }
+
+    @Test
+    func previewCostMatchesAnalyticsDemoForTheSameDate() throws {
+        let now = Date(timeIntervalSince1970: 1_791_230_400)
+        let data = AnalyticsData.demo(now: now)
+        let week = AnalyticsEngine.summarize(data, filter: AnalyticsFilter(), now: now)
+        var lifetime = AnalyticsFilter()
+        lifetime.period = .allTime
+        let all = AnalyticsEngine.summarize(data, filter: lifetime, now: now)
+        for language in [AppLanguage.english, .simplifiedChinese] {
+            let cost = try #require(UsageSnapshot.preview(language: language, now: now).apiCostEstimate)
+            #expect(cost.currentWeekUSD == week.totals.usd)
+            #expect(cost.lifetimeUSD == all.totals.usd)
+        }
     }
 
     @Test

@@ -18,9 +18,11 @@ final class TransparentUsagePanelController {
     }
 
     private let panel: TransparentUsagePanel
+    private let store: UsageStore
     private let tuning: GlassTuning
     private weak var statusItem: NSStatusItem?
     private let refresh: () -> Void
+    private let openAnalytics: () -> Void
     private let visibilityDidChange: (Bool) -> Void
     private var globalEventMonitor: Any?
     private var localEventMonitor: Any?
@@ -29,10 +31,13 @@ final class TransparentUsagePanelController {
         store: UsageStore,
         statusItem: NSStatusItem,
         refresh: @escaping () -> Void,
+        openAnalytics: @escaping () -> Void,
         visibilityDidChange: @escaping (Bool) -> Void
     ) {
         self.statusItem = statusItem
+        self.store = store
         self.refresh = refresh
+        self.openAnalytics = openAnalytics
         self.visibilityDidChange = visibilityDidChange
         tuning = .final
         panel = TransparentUsagePanel(
@@ -99,6 +104,10 @@ final class TransparentUsagePanelController {
                 store: store,
                 tuning: tuning,
                 onRefresh: refresh,
+                onOpenAnalytics: { [weak self] in
+                    self?.close()
+                    self?.openAnalytics()
+                },
                 onHeightChange: { [weak self] height in
                     self?.resizePanel(to: height)
                 }
@@ -113,7 +122,9 @@ final class TransparentUsagePanelController {
     }
 
     private func resizePanel(to height: CGFloat) {
-        let height = min(UsagePanelMetrics.height, max(135, height.rounded()))
+        let screen = statusItem?.button?.window?.screen ?? NSScreen.main
+        let available = max(135, (screen?.visibleFrame.height ?? UsagePanelMetrics.height) - 2 * Layout.screenMargin)
+        let height = min(available, max(135, height.rounded()))
         guard abs(panel.frame.height - height) > 0.5 else { return }
 
         var frame = panel.frame
@@ -126,6 +137,9 @@ final class TransparentUsagePanelController {
     }
 
     private func show() {
+        let screen = statusItem?.button?.window?.screen ?? NSScreen.main
+        store.panelMaximumHeight = max(135, (screen?.visibleFrame.height ?? UsagePanelMetrics.height) - 2 * Layout.screenMargin)
+        resizePanel(to: min(store.panelMaximumHeight, panel.frame.height))
         positionPanel()
         panel.makeKeyAndOrderFront(nil)
         panel.invalidateShadow()
@@ -160,9 +174,8 @@ final class TransparentUsagePanelController {
         x = min(visibleFrame.maxX - Layout.width - Layout.screenMargin, x)
 
         var y = buttonFrameOnScreen.minY - panel.frame.height - Layout.statusBarGap
-        if y < visibleFrame.minY + Layout.screenMargin {
-            y = buttonFrameOnScreen.maxY + Layout.statusBarGap
-        }
+        y = max(visibleFrame.minY + Layout.screenMargin, y)
+        y = min(visibleFrame.maxY - panel.frame.height - Layout.screenMargin, y)
         panel.setFrameOrigin(NSPoint(x: x.rounded(), y: y.rounded()))
     }
 

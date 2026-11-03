@@ -9,23 +9,39 @@ enum SessionAPICostEstimator {
         ledgerURL: URL = APICostLedgerStore.defaultURL,
         sessionRoots: [URL]? = nil
     ) -> CodexAPICostEstimate? {
+        scan(now: now, calendar: calendar, ledgerURL: ledgerURL, sessionRoots: sessionRoots).estimate
+    }
+
+    static func scan(
+        now: Date = Date(),
+        calendar: Calendar = .current,
+        ledgerURL: URL = APICostLedgerStore.defaultURL,
+        sessionRoots: [URL]? = nil
+    ) -> CostScanResult {
+        var health = CostIngestionHealth()
         let roots: [URL]
         if let sessionRoots {
             roots = sessionRoots
         } else {
-            let codexRoot = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".codex", isDirectory: true)
-            roots = [
-                codexRoot.appendingPathComponent("sessions", isDirectory: true),
-                codexRoot.appendingPathComponent("archived_sessions", isDirectory: true)
-            ]
+            roots = CodexEnvironment.sessionRoots
         }
         let allFiles = allSessionFiles(in: roots)
+        health.discoveredFiles = allFiles.count
+        if !roots.isEmpty && !roots.contains(where: { FileManager.default.isReadableFile(atPath: $0.path) }) {
+            health.record("session-roots-unavailable")
+        }
 
-        ledgerLock.lock()
+        while !ledgerLock.try() {
+            if Task.isCancelled {
+                health.record("cancelled")
+                return CostScanResult(estimate: nil, health: health, failure: "Scan cancelled")
+            }
+            Thread.sleep(forTimeInterval: 0.01)
+        }
         defer { ledgerLock.unlock() }
 
         do {
+            try Task.checkCancellation()
             let store = APICostLedgerStore(url: ledgerURL)
             let indexStore = SessionFileIndexStore(ledgerURL: ledgerURL)
             var ledger = try store.load()
@@ -55,11 +71,12 @@ enum SessionAPICostEstimator {
             var indexDidChange = !indexMatchesLedger
 
             for url in allFiles {
+                try Task.checkCancellation()
                 let previous = savedIndex.entries[SessionFileIndex.key(for: url)]
                 guard let inspection = SessionFileIndexInspector.inspect(
                     url,
                     previousEntry: previous
-                ) else { continue }
+                ) else { health.record("file-unreadable"); continue }
 
                 let mustResolveMetadata = inspection.change == .rebuilt
                     || previous?.metadataResolved == false
@@ -71,7 +88,8 @@ enum SessionAPICostEstimator {
                     SessionLogCursorState(
                         completeLineCursor: $0.completeLineCursor,
                         currentModel: $0.currentModel,
-                        summary: $0.summary
+                        summary: $0.summary,
+                        issueCodes: $0.issueCodes ?? []
                     )
                 }
                 observations.append(IndexedSessionObservation(
@@ -137,8 +155,12 @@ enum SessionAPICostEstimator {
             }
 
             for index in observations.indices {
+                try Task.checkCancellation()
                 let descriptor = observations[index].descriptor
-                guard descriptor.metadataResolved else { continue }
+                guard descriptor.metadataResolved else {
+                    health.record("metadata-unresolved", sessionID: descriptor.sessionID)
+                    continue
+                }
                 let inheritedBaseline: TokenCounts
                 if descriptor.parentSessionID != nil {
                     if unresolvedForkIDs.contains(descriptor.sessionID) {
@@ -149,9 +171,11 @@ enum SessionAPICostEstimator {
                     guard let resolved = inheritedBaselines[descriptor.sessionID] else {
                         // A fork without a resolvable parent snapshot remains
                         // unpriced; billing copied context would inflate cost.
+                        health.record("child-counter-baseline-unresolved", sessionID: descriptor.sessionID)
                         continue
                     }
                     inheritedBaseline = resolved
+                    observations[index].inheritedBaseline = resolved
                 } else {
                     inheritedBaseline = .zero
                 }
@@ -214,12 +238,18 @@ enum SessionAPICostEstimator {
                 guard let incremental = SessionUsageLogReader.incrementalRead(
                     for: descriptor,
                     previous: seed
-                ) else { continue }
+                ) else {
+                    health.record("log-read-failed", sessionID: descriptor.sessionID)
+                    continue
+                }
                 observations[index].state = incremental.state
 
                 guard let summary = incremental.state.summary,
                       let adjustedSummary = summary.subtracting(inheritedBaseline)
-                else { continue }
+                else {
+                    health.record("counters-below-checkpoint", sessionID: descriptor.sessionID)
+                    continue
+                }
                 if ledger.observeIncrement(
                     sessionID: descriptor.sessionID,
                     summary: adjustedSummary,
@@ -229,6 +259,9 @@ enum SessionAPICostEstimator {
                         : inheritedBaseline
                 ) {
                     didChange = true
+                } else if TokenCounts(summary: adjustedSummary) != checkpoint.counts {
+                    health.record("increment-reconciliation-failed", sessionID: descriptor.sessionID)
+                    observations[index].state?.issueCodes.append("increment-reconciliation-failed")
                 }
             }
 
@@ -261,6 +294,7 @@ enum SessionAPICostEstimator {
                         entry.currentModel = state.currentModel
                         entry.summaryModel = state.summary?.model
                         entry.summaryCounts = state.summary.map(TokenCounts.init(summary:))
+                        entry.issueCodes = state.issueCodes
                     }
                     if entry != oldEntry {
                         nextIndex.entries[path] = entry
@@ -283,6 +317,7 @@ enum SessionAPICostEstimator {
             }
 
             if didChange || indexDidChange {
+                try Task.checkCancellation()
                 // The cost ledger is the source of truth. Persist it before an
                 // index cursor can acknowledge bytes as consumed.
                 ledger.advanceRevision()
@@ -292,11 +327,43 @@ enum SessionAPICostEstimator {
                 // successfully persisted cost estimate.
                 try? indexStore.save(nextIndex)
             }
-            return ledger.estimate(currentWeekDayKeys: currentWeekDayKeys(now: now, calendar: calendar))
+            health.indexedFiles = nextIndex.entries.count
+            health.unchangedFiles = observations.filter { $0.inspection.change == .unchanged }.count
+            health.filesWithUsage = nextIndex.entries.values.filter { $0.summary != nil }.count
+            for entry in nextIndex.entries.values {
+                for code in entry.issueCodes ?? [] { health.record(code, sessionID: entry.sessionID) }
+                if entry.parentSessionID != nil && entry.inheritedBaseline == nil {
+                    health.record("child-counter-baseline-unresolved", sessionID: entry.sessionID)
+                }
+            }
+            for record in ledger.records {
+                if let issue = record.accountingNote ?? record.counts.accountingIssue { health.record(issue, sessionID: record.sessionID) }
+                else if record.price == nil { health.record("unpriced-model:\(record.model)", sessionID: record.sessionID) }
+            }
+            do {
+                let names = sessionRoots == nil ? CodexSessionNames.read() : [:]
+                var sessions: [String: AnalyticsSession] = [:]
+                for entry in nextIndex.entries.values {
+                    sessions[entry.sessionID] = AnalyticsSession(id: entry.sessionID, parentID: entry.parentSessionID,
+                                                                 title: names[entry.sessionID] ?? "")
+                }
+                // Preserve discoverability of old, frozen records after their
+                // source files are archived or removed. No source file is deleted.
+                for record in ledger.records where sessions[record.sessionID] == nil {
+                    sessions[record.sessionID] = AnalyticsSession(id: record.sessionID, title: names[record.sessionID] ?? "")
+                }
+                let database = AnalyticsDatabase(url: ledgerURL.deletingLastPathComponent().appendingPathComponent("analytics.sqlite"))
+                try database.synchronize(ledger: ledger, sessions: Array(sessions.values), now: now)
+            } catch is CancellationError { throw CancellationError() }
+            catch { health.record("analytics-database-unavailable") }
+            health.completedAt = now
+            return CostScanResult(estimate: ledger.estimate(currentWeekDayKeys: currentWeekDayKeys(now: now, calendar: calendar)), health: health)
         } catch {
             // Do not recreate or reprice history when the durable ledger cannot
             // be read or written. The rest of the usage panel can still refresh.
-            return nil
+            health.record(error is CancellationError ? "cancelled" : "ledger-read-or-write-failed")
+            return CostScanResult(estimate: nil, health: health,
+                                  failure: error is CancellationError ? "Scan cancelled" : "Local ledger could not be read or saved")
         }
     }
 
@@ -339,12 +406,15 @@ enum SessionAPICostEstimator {
             ) else { continue }
 
             for case let url as URL in enumerator where url.pathExtension == "jsonl" {
+                if Task.isCancelled { break }
                 if filesByName[url.lastPathComponent] == nil {
                     filesByName[url.lastPathComponent] = url
                 }
             }
         }
-        return Array(filesByName.values)
+        // Stable replay order is required when several continuation files
+        // contain the same session ID and share one durable checkpoint.
+        return filesByName.values.sorted { $0.path < $1.path }
     }
 
     static func currentWeekDayKeys(now: Date, calendar: Calendar) -> Set<String> {

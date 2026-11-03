@@ -4,6 +4,62 @@ import Testing
 
 struct UsageStoreLifecycleTests {
     @Test @MainActor
+    func offlineRefreshRetainsLastGoodQuotaAndLocalCostThenRecovers() async throws {
+        let client = SwitchableUsageClient(usage: Self.liveUsage)
+        let estimate = CodexAPICostEstimate(currentWeekUSD: 12, lifetimeUSD: 34,
+            pricedTokens: 100, observedTokens: 100, modelNames: ["test-model"])
+        let store = UsageStore(language: .english, client: client, apiCostEstimator: { estimate })
+        await store.refreshAPICost()
+        await store.refreshLive()
+        let successfulRead = store.sourceHealth[.limits]?.lastSuccess
+        let quota = store.menuPercent
+        await client.setOffline(true)
+        await store.refreshLive()
+        #expect(store.sourceHealth[.limits]?.state == .stale)
+        #expect(store.sourceHealth[.limits]?.lastSuccess == successfulRead)
+        #expect(store.menuPercent == quota)
+        #expect(store.menuText.hasSuffix(" !"))
+        #expect(store.sourceHealth[.cost]?.state == .live)
+        #expect(store.snapshot.apiCostEstimate?.lifetimeUSD == 34)
+        await client.setOffline(false)
+        await store.refreshLive()
+        #expect(store.sourceHealth[.limits]?.state == .live)
+        #expect(!store.menuText.hasSuffix(" !"))
+        #expect(store.snapshot.apiCostEstimate?.lifetimeUSD == 34)
+        await store.shutdown()
+    }
+
+    @Test @MainActor
+    func offlineFirstLaunchDoesNotInventQuotaOrDemoValues() async {
+        let client = SwitchableUsageClient(usage: Self.liveUsage)
+        await client.setOffline(true)
+        let store = UsageStore(language: .english, client: client, apiCostEstimator: { nil })
+        await store.refreshLive()
+        #expect(store.sourceHealth[.limits]?.state == .unavailable)
+        #expect(store.menuPercent == nil)
+        #expect(store.menuText == "—")
+        #expect(store.snapshot.apiCostEstimate == nil)
+        await store.shutdown()
+    }
+
+    @Test @MainActor
+    func languageChangePreservesLocalCostBeforeAccountConnects() async throws {
+        let name = "localization-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        let estimate = CodexAPICostEstimate(currentWeekUSD: 12, lifetimeUSD: 34,
+            pricedTokens: 100, observedTokens: 100, modelNames: ["test-model"])
+        let store = UsageStore(language: .english, client: ImmediateUsageClient(),
+            apiCostEstimator: { estimate }, defaults: defaults)
+        await store.refreshAPICost()
+        store.setLanguage(.simplifiedChinese)
+        #expect(store.snapshot.apiCostEstimate?.lifetimeUSD == 34)
+        #expect(store.sourceHealth[.cost]?.state == .live)
+        #expect(store.sourceHealth[.limits]?.state == .loading)
+        await store.shutdown()
+    }
+
+    @Test @MainActor
     func liveRefreshMergesTheNewestCostEstimateWhenItReturns() async throws {
         let client = SuspendedUsageClient()
         let estimate = CodexAPICostEstimate(
@@ -80,6 +136,18 @@ struct UsageStoreLifecycleTests {
         recentThreads: [],
         apiCostEstimate: nil
     )
+}
+
+private actor SwitchableUsageClient: CodexUsageFetching {
+    let usage: CodexLiveUsage
+    var offline = false
+    init(usage: CodexLiveUsage) { self.usage = usage }
+    func setOffline(_ value: Bool) { offline = value }
+    func fetchUsage(apiCostEstimate: CodexAPICostEstimate?) async throws -> CodexLiveUsage {
+        if offline { throw CodexUsageClientError.connectionClosed }
+        return usage
+    }
+    func shutdown() async {}
 }
 
 private actor SuspendedUsageClient: CodexUsageFetching {

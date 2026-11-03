@@ -6,7 +6,11 @@ struct UsageSettingsCard: View {
     @Binding var showAPICost: Bool
     @Binding var language: AppLanguage
     let tuning: GlassTuning
+    @Binding var quotaSelection: String
+    let quotaOptions: [UsagePeriod]
     let close: () -> Void
+
+    @AppStorage("display.privacyMode") private var privacyMode = true
 
     @State private var launchAtLoginState = LaunchAtLoginService.state
     @State private var launchAtLoginError: String?
@@ -72,6 +76,13 @@ struct UsageSettingsCard: View {
                     .foregroundStyle(.secondary)
 
                 LanguageSettingRow(language: $language)
+
+                Toggle(language.text("Hide chat names", "隐藏聊天名称"), isOn: $privacyMode)
+                    .font(UsageDesign.font(12.5, language: language))
+                Picker(language.text("Menu quota", "菜单栏额度"), selection: $quotaSelection) {
+                    Text(language.text("Automatic", "自动")).tag("")
+                    ForEach(quotaOptions) { Text($0.title).tag($0.id) }
+                }.font(UsageDesign.font(11, language: language))
 
                 SettingsToggleRow(
                     title: language.launchAtLogin,

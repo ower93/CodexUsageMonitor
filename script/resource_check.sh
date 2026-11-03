@@ -4,12 +4,15 @@ set -euo pipefail
 APP_NAME="CodexUsageMonitor"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_BUNDLE="${CODEX_USAGE_APP_BUNDLE:-$ROOT_DIR/dist/$APP_NAME.app}"
+APP_BUNDLE="$(cd "$APP_BUNDLE" && pwd -P)"
 APP_BINARY="$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 DURATION_SECONDS="${1:-180}"
 SAMPLE_SECONDS="${SAMPLE_SECONDS:-5}"
 CHILD_START_TIMEOUT_SECONDS="${CHILD_START_TIMEOUT_SECONDS:-20}"
 MAX_RSS_GROWTH_KIB="${MAX_RSS_GROWTH_KIB:-131072}"
 MAX_RSS_PEAK_KIB="${MAX_RSS_PEAK_KIB:-524288}"
+MAX_CHILD_RSS_GROWTH_KIB="${MAX_CHILD_RSS_GROWTH_KIB:-131072}"
+MAX_CHILD_RSS_PEAK_KIB="${MAX_CHILD_RSS_PEAK_KIB:-524288}"
 MAX_FD_GROWTH="${MAX_FD_GROWTH:-16}"
 MAX_FD_PEAK="${MAX_FD_PEAK:-256}"
 REPORT="${CODEX_USAGE_RESOURCE_REPORT:-$ROOT_DIR/work/resource-check.csv}"
@@ -21,7 +24,7 @@ pid_is_test_app() {
   local pid="$1"
   local command
   command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
-  [[ "$command" == "$APP_BINARY" ]]
+  [[ "$command" == "$APP_BINARY" || "$command" == "$APP_BINARY --qa-profile" ]]
 }
 
 pid_is_app_server() {
@@ -62,6 +65,8 @@ stop_test_app_pid() {
     kill -KILL "$pid" 2>/dev/null || true
   fi
   wait_for_test_app_exit "$pid"
+  # Forced cleanup is not a successful graceful-shutdown test.
+  return 1
 }
 
 stop_existing_test_apps() {
@@ -175,10 +180,18 @@ force_cleanup() {
     fi
   done
 }
-trap force_cleanup EXIT INT TERM
-
 if [[ ! -x "$APP_BINARY" ]]; then
   echo "Missing app bundle: $APP_BUNDLE" >&2
+  exit 2
+fi
+if [[ -z "${CODEX_USAGE_DATA_DIR:-}" || ! -d "$CODEX_USAGE_DATA_DIR" ]]; then
+  echo "Resource checks require an existing isolated CODEX_USAGE_DATA_DIR." >&2
+  exit 2
+fi
+DATA_DIR="$(cd "$CODEX_USAGE_DATA_DIR" && pwd -P)"
+PRODUCTION_DATA_DIR="$(cd "$HOME/Library/Application Support/CodexUsageMonitor" 2>/dev/null && pwd -P || true)"
+if [[ -n "$PRODUCTION_DATA_DIR" && "$DATA_DIR" == "$PRODUCTION_DATA_DIR" ]]; then
+  echo "Refusing a resource check against the production data directory." >&2
   exit 2
 fi
 if ! [[ "$DURATION_SECONDS" =~ ^[0-9]+$ ]] || (( DURATION_SECONDS < 1 )); then
@@ -190,6 +203,8 @@ for numeric_value in \
   "$CHILD_START_TIMEOUT_SECONDS" \
   "$MAX_RSS_GROWTH_KIB" \
   "$MAX_RSS_PEAK_KIB" \
+  "$MAX_CHILD_RSS_GROWTH_KIB" \
+  "$MAX_CHILD_RSS_PEAK_KIB" \
   "$MAX_FD_GROWTH" \
   "$MAX_FD_PEAK"; do
   if ! [[ "$numeric_value" =~ ^[0-9]+$ ]]; then
@@ -203,12 +218,24 @@ if (( SAMPLE_SECONDS < 1 || CHILD_START_TIMEOUT_SECONDS < 1 )); then
 fi
 
 mkdir -p "$(dirname "$REPORT")"
+# Validation must be side-effect free: an invalid invocation must not terminate
+# an existing app at the requested bundle path through the cleanup handler.
+trap force_cleanup EXIT INT TERM
 stop_existing_test_apps
 if [[ -n "$(find_app_pids)" ]]; then
   echo "A matching test app is still running before launch." >&2
   exit 1
 fi
-/usr/bin/open -n "$APP_BUNDLE"
+open_arguments=(-n -g --stdout "${REPORT%.csv}-app.log" --stderr "${REPORT%.csv}-app.log"
+  --env "CODEX_USAGE_DATA_DIR=$DATA_DIR")
+if [[ -n "${CODEX_HOME:-}" ]]; then
+  open_arguments+=(--env "CODEX_HOME=$CODEX_HOME")
+fi
+open_arguments+=("$APP_BUNDLE")
+if [[ "${QA_PROFILE:-0}" == "1" ]]; then
+  open_arguments+=(--args --qa-profile)
+fi
+/usr/bin/open "${open_arguments[@]}"
 APP_PID="$(capture_single_new_app_pid || true)"
 if [[ -z "$APP_PID" ]]; then
   echo "Exactly one new app did not launch from the expected bundle." >&2
@@ -218,11 +245,14 @@ if ! wait_for_initial_child; then
   exit 1
 fi
 
-echo "timestamp,pid,cpu_percent,rss_kib,open_fds,app_server_child_pid" >"$REPORT"
+echo "timestamp,pid,cpu_percent,rss_kib,open_fds,app_server_child_pid,child_cpu_percent,child_rss_kib" >"$REPORT"
 deadline=$((SECONDS + DURATION_SECONDS))
 first_rss=""
 last_rss=""
 peak_rss=0
+first_child_rss=""
+last_child_rss=""
+peak_child_rss=0
 first_fds=""
 last_fds=""
 peak_fds=0
@@ -234,7 +264,7 @@ while (( SECONDS < deadline )); do
 
   read -r cpu rss < <(ps -p "$APP_PID" -o %cpu=,rss=)
   rss="${rss//[[:space:]]/}"
-  fds="$(lsof -p "$APP_PID" 2>/dev/null | wc -l | tr -d ' ')"
+  fds="$(lsof -a -p "$APP_PID" -F f 2>/dev/null | awk '/^f[0-9]/ { count++ } END { print count+0 }')"
   child_pids="$(app_server_child_pids)"
   child_count="$(printf '%s\n' "$child_pids" | awk 'NF { count += 1 } END { print count + 0 }')"
   remember_child_pids $child_pids
@@ -247,22 +277,29 @@ while (( SECONDS < deadline )); do
     echo "app-server PID changed from $CHILD_PID to $current_child_pid." >&2
     exit 1
   fi
+  read -r child_cpu child_rss < <(ps -p "$CHILD_PID" -o %cpu=,rss=)
+  child_rss="${child_rss//[[:space:]]/}"
 
   [[ -n "$first_rss" ]] || first_rss="$rss"
   [[ -n "$first_fds" ]] || first_fds="$fds"
   last_rss="$rss"
+  [[ -n "$first_child_rss" ]] || first_child_rss="$child_rss"
+  last_child_rss="$child_rss"
   last_fds="$fds"
   (( rss > peak_rss )) && peak_rss="$rss"
+  (( child_rss > peak_child_rss )) && peak_child_rss="$child_rss"
   (( fds > peak_fds )) && peak_fds="$fds"
-  printf '%s,%s,%s,%s,%s,%s\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$APP_PID" "$cpu" "$rss" "$fds" "$CHILD_PID" \
+  printf '%s,%s,%s,%s,%s,%s,%s,%s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$APP_PID" "$cpu" "$rss" "$fds" "$CHILD_PID" "$child_cpu" "$child_rss" \
     >>"$REPORT"
   sleep "$SAMPLE_SECONDS"
 done
 
 rss_growth=$((last_rss - first_rss))
+child_rss_growth=$((last_child_rss - first_child_rss))
 fd_growth=$((last_fds - first_fds))
 echo "RSS KiB: first=$first_rss last=$last_rss peak=$peak_rss growth=$rss_growth"
+echo "Helper RSS KiB: first=$first_child_rss last=$last_child_rss peak=$peak_child_rss growth=$child_rss_growth"
 echo "Open FDs: first=$first_fds last=$last_fds peak=$peak_fds growth=$fd_growth"
 
 if ! stop_test_app_pid "$APP_PID"; then
@@ -284,6 +321,14 @@ if (( peak_rss > MAX_RSS_PEAK_KIB )); then
   echo "FAIL: peak RSS $peak_rss KiB exceeds $MAX_RSS_PEAK_KIB KiB." >&2
   exit 1
 fi
+if (( child_rss_growth > MAX_CHILD_RSS_GROWTH_KIB )); then
+  echo "FAIL: helper RSS growth $child_rss_growth KiB exceeds $MAX_CHILD_RSS_GROWTH_KIB KiB." >&2
+  exit 1
+fi
+if (( peak_child_rss > MAX_CHILD_RSS_PEAK_KIB )); then
+  echo "FAIL: helper peak RSS $peak_child_rss KiB exceeds $MAX_CHILD_RSS_PEAK_KIB KiB." >&2
+  exit 1
+fi
 if (( fd_growth > MAX_FD_GROWTH )); then
   echo "FAIL: file descriptor growth $fd_growth exceeds $MAX_FD_GROWTH." >&2
   exit 1
@@ -293,4 +338,4 @@ if (( peak_fds > MAX_FD_PEAK )); then
   exit 1
 fi
 
-echo "PASS: one stable app-server child, bounded RSS/FD usage, and no orphan after shutdown. Report: $REPORT"
+echo "PASS: one stable app-server child, bounded app/helper RSS and app FDs, and no orphan after shutdown. Report: $REPORT"

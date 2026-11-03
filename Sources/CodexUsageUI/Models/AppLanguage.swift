@@ -150,7 +150,7 @@ public enum AppLanguage: String, CaseIterable, Identifiable, Sendable {
     var metricCurrent: String {
         switch self {
         case .simplifiedChinese: "最新线程"
-        case .english: "Latest Thread"
+        case .english: "Latest Chat"
         }
     }
 
@@ -163,8 +163,8 @@ public enum AppLanguage: String, CaseIterable, Identifiable, Sendable {
 
     var metricLifetime: String {
         switch self {
-        case .simplifiedChinese: "累计"
-        case .english: "Lifetime"
+        case .simplifiedChinese: "账户累计"
+        case .english: "Account Total"
         }
     }
 
@@ -233,8 +233,8 @@ public enum AppLanguage: String, CaseIterable, Identifiable, Sendable {
 
     var lifetimeCost: String {
         switch self {
-        case .simplifiedChinese: "生涯总费用"
-        case .english: "Lifetime Cost"
+        case .simplifiedChinese: "本机生涯估算"
+        case .english: "Local Lifetime"
         }
     }
 
@@ -254,8 +254,8 @@ public enum AppLanguage: String, CaseIterable, Identifiable, Sendable {
 
     var costDisclaimer: String {
         switch self {
-        case .simplifiedChinese: "按标准短上下文价估算，不含缓存写入溢价、其他加价与税费"
-        case .english: "Standard short-context rates; excludes cache-write premiums, surcharges and tax."
+        case .simplifiedChinese: "API 等值估算，非实际账单；不含缓存写入溢价、其他加价与税费"
+        case .english: "API-equivalent, not a bill; excludes cache-write premiums, surcharges and tax."
         }
     }
 
@@ -282,8 +282,8 @@ public enum AppLanguage: String, CaseIterable, Identifiable, Sendable {
 
     func updatedAt(_ time: String) -> String {
         switch self {
-        case .simplifiedChinese: "更新于 \(time)"
-        case .english: "Updated \(time)"
+        case .simplifiedChinese: "额度更新 \(time)"
+        case .english: "Quota updated \(time)"
         }
     }
 

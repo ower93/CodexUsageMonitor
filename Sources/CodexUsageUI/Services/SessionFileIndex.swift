@@ -2,7 +2,9 @@ import Darwin
 import Foundation
 
 struct SessionFileIndex: Codable, Equatable, Sendable {
-    static let currentSchemaVersion = 2
+    // Re-evaluate order-dependent continuation baselines once.
+    // This invalidates only the disposable index, never frozen ledger history.
+    static let currentSchemaVersion = 4
 
     var schemaVersion: Int
     var ledgerRevision: UInt64
@@ -34,6 +36,7 @@ struct SessionFileIndex: Codable, Equatable, Sendable {
         var summaryCounts: TokenCounts?
         var inheritedBaseline: TokenCounts?
         var baselineResolutionAttempted: Bool
+        var issueCodes: [String]? = nil
 
         var summary: SessionTokenSummary? {
             guard let summaryModel, let summaryCounts else { return nil }
@@ -198,7 +201,8 @@ enum SessionFileIndexInspector {
             summaryModel: summary?.model,
             summaryCounts: summary.map(TokenCounts.init(summary:)),
             inheritedBaseline: inheritedBaseline,
-            baselineResolutionAttempted: baselineResolutionAttempted
+            baselineResolutionAttempted: baselineResolutionAttempted,
+            issueCodes: state?.issueCodes
         )
     }
 }
