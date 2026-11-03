@@ -22,10 +22,12 @@ struct RecentTask: Identifiable, Codable, Sendable {
 }
 
 struct APICostEstimateSnapshot: Codable, Sendable {
-    let sevenDayUSD: Double
+    let currentWeekUSD: Double
     let lifetimeUSD: Double
     let coveragePercent: Int
     let modelNames: [String]
+    var hasPricedUsage = true
+    var currentWeekHasPricedUsage = true
 }
 
 struct UsageSnapshot: Codable, Sendable {
@@ -34,11 +36,24 @@ struct UsageSnapshot: Codable, Sendable {
     var metrics: [UsageMetric]
     var recentTasks: [RecentTask]
     var apiCostEstimate: APICostEstimateSnapshot?
-    var availableResets: Int
-    var updatedAt: Date
+    var availableResets: Int?
+    var updatedAt: Date?
 
-    static func preview(language: AppLanguage) -> UsageSnapshot {
+    static func empty(language: AppLanguage) -> UsageSnapshot {
+        UsageSnapshot(planLabel: "CODEX", periods: [], metrics: [
+            UsageMetric(id: "current", value: "—", label: language.metricCurrent),
+            UsageMetric(id: "week", value: "—", label: language.metricSevenDays),
+            UsageMetric(id: "total", value: "—", label: language.metricLifetime)
+        ], recentTasks: [], apiCostEstimate: nil, availableResets: nil, updatedAt: nil)
+    }
+
+    static func preview(language: AppLanguage, now: Date = Date()) -> UsageSnapshot {
         let taskCopy = language.previewTasks
+        let demo = AnalyticsData.demo(now: now)
+        let week = AnalyticsEngine.summarize(demo, filter: AnalyticsFilter(), now: now)
+        var all = AnalyticsFilter()
+        all.period = .allTime
+        let lifetime = AnalyticsEngine.summarize(demo, filter: all, now: now)
         return UsageSnapshot(
             planLabel: "PRO",
             periods: [
@@ -46,21 +61,17 @@ struct UsageSnapshot: Codable, Sendable {
                     id: "five-hour",
                     title: language.quotaTitle(durationMinutes: 300, index: 0),
                     remainingPercent: 78,
-                    resetText: language == .simplifiedChinese
-                        ? "重置 3 小时后 (7月12日 18:41)"
-                        : "Resets in 3 hr (Jul 12, 18:41)"
+                    resetText: language.resetDescription(for: now.addingTimeInterval(3 * 3600), now: now)
                 ),
                 UsagePeriod(
                     id: "seven-day",
                     title: language.quotaTitle(durationMinutes: 10_080, index: 1),
                     remainingPercent: 72,
-                    resetText: language == .simplifiedChinese
-                        ? "重置 5 天后 (7月18日 14:45)"
-                        : "Resets in 5 days (Jul 18, 14:45)"
+                    resetText: language.resetDescription(for: now.addingTimeInterval(5 * 86400), now: now)
                 )
             ],
             metrics: [
-                UsageMetric(id: "current", value: "24.80M", label: language.previewCurrentMetric),
+                UsageMetric(id: "current", value: "24.80M", label: language.metricCurrent),
                 UsageMetric(id: "week", value: "1.26B", label: language.metricSevenDays),
                 UsageMetric(id: "total", value: "3.84B", label: language.metricLifetime)
             ],
@@ -88,13 +99,13 @@ struct UsageSnapshot: Codable, Sendable {
                 )
             ],
             apiCostEstimate: APICostEstimateSnapshot(
-                sevenDayUSD: 186.42,
-                lifetimeUSD: 1_980,
-                coveragePercent: 94,
-                modelNames: ["GPT-5.5", "GPT-5.6 Sol"]
+                currentWeekUSD: week.totals.usd,
+                lifetimeUSD: lifetime.totals.usd,
+                coveragePercent: Int((lifetime.totals.pricedShare ?? 0) * 100),
+                modelNames: lifetime.models.map(\.id)
             ),
             availableResets: 2,
-            updatedAt: Date()
+            updatedAt: now
         )
     }
 }

@@ -1,9 +1,10 @@
+import AppKit
 import SwiftUI
 
 public enum UsagePanelMetrics {
     public static let width: CGFloat = 370
     public static let height: CGFloat = 776
-    public static let settingsMinimumHeight: CGFloat = 430
+    public static let settingsMinimumHeight: CGFloat = 530
 
     public static func preferredHeight(
         showUsageSummary: Bool,
@@ -36,6 +37,7 @@ enum UsageDesign {
         if language == .english {
             return .system(size: size, weight: .regular, design: .rounded)
         }
+        if NSFont(name: "MicrosoftYaHei", size: size) != nil { return .custom("MicrosoftYaHei", size: size) }
         let fontName = weight == .regular
             ? "STHeitiSC-Light"
             : "STHeitiSC-Medium"

@@ -2,19 +2,43 @@ import Foundation
 
 struct CodexLiveUsage: Sendable {
     let rateLimits: CodexRateLimitSnapshot
-    let availableResetCount: Int
+    let availableResetCount: Int?
     let lifetimeTokens: Int64?
     let dailyUsage: [CodexDailyUsage]
     let recentThreads: [CodexThreadUsage]
     let apiCostEstimate: CodexAPICostEstimate?
+    var dailyUsageAvailable: Bool = true
+    var rateLimitBuckets: [CodexRateLimitBucket] = []
+    var sourceHealth: [UsageSource: SourceHealth] = [:]
+
+    func replacingAPICostEstimate(_ estimate: CodexAPICostEstimate?) -> CodexLiveUsage {
+        CodexLiveUsage(
+            rateLimits: rateLimits,
+            availableResetCount: availableResetCount,
+            lifetimeTokens: lifetimeTokens,
+            dailyUsage: dailyUsage,
+            recentThreads: recentThreads,
+            apiCostEstimate: estimate,
+            dailyUsageAvailable: dailyUsageAvailable,
+            rateLimitBuckets: rateLimitBuckets,
+            sourceHealth: sourceHealth
+        )
+    }
+}
+
+struct CodexRateLimitBucket: Sendable {
+    let id: String
+    let name: String?
+    let snapshot: CodexRateLimitSnapshot
 }
 
 struct CodexAPICostEstimate: Sendable {
-    let sevenDayUSD: Double
+    let currentWeekUSD: Double
     let lifetimeUSD: Double
     let pricedTokens: Int64
     let observedTokens: Int64
     let modelNames: [String]
+    var currentWeekPricedTokens: Int64? = nil
 }
 
 struct CodexRateLimitSnapshot: Sendable {
@@ -43,15 +67,21 @@ struct CodexThreadUsage: Sendable {
 
 extension UsageSnapshot {
     init(live: CodexLiveUsage, language: AppLanguage, now: Date = Date()) {
-        let windows = [live.rateLimits.primary, live.rateLimits.secondary].compactMap { $0 }
-        let periods = windows.enumerated().map { index, window in
-            let remaining = max(0, min(100, Int((100 - window.usedPercent).rounded())))
+        let buckets = live.rateLimitBuckets.isEmpty
+            ? [CodexRateLimitBucket(id: "codex", name: nil, snapshot: live.rateLimits)]
+            : live.rateLimitBuckets
+        let periods = buckets.flatMap { bucket in
+          [bucket.snapshot.primary, bucket.snapshot.secondary].enumerated().compactMap { index, optional -> UsagePeriod? in
+            guard let window = optional, window.usedPercent.isFinite else { return nil }
+            let remaining = Int(max(0, min(100, 100 - window.usedPercent)).rounded())
             return UsagePeriod(
-                id: index == 0 ? "primary" : "secondary",
-                title: language.quotaTitle(durationMinutes: window.windowDurationMinutes, index: index),
+                id: "\(bucket.id).\(index == 0 ? "primary" : "secondary")",
+                title: (buckets.count > 1 ? "\(bucket.name ?? bucket.id) · " : "")
+                    + language.quotaTitle(durationMinutes: window.windowDurationMinutes, index: index),
                 remainingPercent: remaining,
                 resetText: language.resetDescription(for: window.resetsAt, now: now)
             )
+          }
         }
 
         let calendar = Calendar.current
@@ -62,7 +92,7 @@ extension UsageSnapshot {
         parser.calendar = Calendar(identifier: .gregorian)
         parser.dateFormat = "yyyy-MM-dd"
         let sevenDayTokens = live.dailyUsage.reduce(into: Int64(0)) { total, bucket in
-            if let date = parser.date(from: bucket.startDate), date >= sevenDayCutoff {
+            if let date = parser.date(from: bucket.startDate), date >= sevenDayCutoff, date <= startOfToday {
                 total += bucket.tokens
             }
         }
@@ -70,7 +100,7 @@ extension UsageSnapshot {
         let firstThreadTokens = live.recentThreads.first?.totalTokens
         let metrics = [
             UsageMetric(id: "current", value: Self.formatTokens(firstThreadTokens), label: language.metricCurrent),
-            UsageMetric(id: "week", value: Self.formatTokens(sevenDayTokens), label: language.metricSevenDays),
+            UsageMetric(id: "week", value: Self.formatTokens(live.dailyUsageAvailable ? sevenDayTokens : nil), label: language.metricSevenDays),
             UsageMetric(id: "total", value: Self.formatTokens(live.lifetimeTokens), label: language.metricLifetime)
         ]
 
@@ -98,16 +128,18 @@ extension UsageSnapshot {
             recentTasks: recentTasks,
             apiCostEstimate: live.apiCostEstimate.map { estimate in
                 APICostEstimateSnapshot(
-                    sevenDayUSD: estimate.sevenDayUSD,
+                    currentWeekUSD: estimate.currentWeekUSD,
                     lifetimeUSD: estimate.lifetimeUSD,
                     coveragePercent: estimate.observedTokens > 0
                         ? Int((Double(estimate.pricedTokens) / Double(estimate.observedTokens) * 100).rounded())
                         : 0,
-                    modelNames: estimate.modelNames
+                    modelNames: estimate.modelNames,
+                    hasPricedUsage: estimate.pricedTokens > 0,
+                    currentWeekHasPricedUsage: estimate.currentWeekPricedTokens.map { $0 > 0 } ?? (estimate.currentWeekUSD > 0)
                 )
             },
             availableResets: live.availableResetCount,
-            updatedAt: now
+            updatedAt: live.sourceHealth[.limits]?.lastSuccess ?? (live.sourceHealth.isEmpty ? now : nil)
         )
     }
 

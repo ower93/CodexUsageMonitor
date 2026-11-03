@@ -6,23 +6,33 @@ public struct UsagePanelView: View {
     @AppStorage("display.showUsageSummaryCard") private var storedShowUsageSummary = true
     @AppStorage("display.showRecentTasksCard") private var storedShowRecentTasks = true
     @AppStorage("display.showAPICostCard") private var storedShowAPICost = true
+    @AppStorage("display.privacyMode") private var privacyMode = true
     @State private var isShowingSettings: Bool
 
     let tuning: GlassTuning
     private let preferencesEnabled: Bool
+    private let onRefresh: (() -> Void)?
+    private let onOpenAnalytics: (() -> Void)?
     private let onHeightChange: ((CGFloat) -> Void)?
+    private let previewHeight: CGFloat?
 
     public init(
         store: UsageStore,
         tuning: GlassTuning,
         preferencesEnabled: Bool = true,
         settingsInitiallyPresented: Bool = false,
+        onRefresh: (() -> Void)? = nil,
+        onOpenAnalytics: (() -> Void)? = nil,
+        previewHeight: CGFloat? = nil,
         onHeightChange: ((CGFloat) -> Void)? = nil
     ) {
         self.store = store
         self.tuning = tuning
         self.preferencesEnabled = preferencesEnabled
+        self.onRefresh = onRefresh
+        self.onOpenAnalytics = onOpenAnalytics
         self.onHeightChange = onHeightChange
+        self.previewHeight = previewHeight
         _isShowingSettings = State(initialValue: settingsInitiallyPresented)
     }
 
@@ -47,32 +57,62 @@ public struct UsagePanelView: View {
     }
 
     private var displayedHeight: CGFloat {
-        isShowingSettings
+        if let previewHeight, !preferencesEnabled {
+            return min(max(135, previewHeight), store.panelMaximumHeight)
+        }
+        let desired = isShowingSettings
             ? max(preferredHeight, UsagePanelMetrics.settingsMinimumHeight)
             : preferredHeight
+        return min(desired + (onOpenAnalytics == nil ? 0 : 35), store.panelMaximumHeight)
     }
 
     public var body: some View {
-        VStack(spacing: 12) {
-            HeaderView(store: store, tuning: tuning, isShowingSettings: $isShowingSettings)
+      VStack(spacing: 0) {
+        ScrollView(.vertical) {
+          VStack(spacing: 12) {
+            HeaderView(
+                store: store,
+                tuning: tuning,
+                isShowingSettings: $isShowingSettings,
+                onRefresh: onRefresh
+            )
             if showUsageSummary {
                 UsageSummaryCard(snapshot: store.snapshot, language: store.language, tuning: tuning)
+                sourceWarnings([.limits, .account])
             }
             if showRecentTasks {
-                RecentTasksCard(tasks: store.snapshot.recentTasks, language: store.language, tuning: tuning)
+                RecentTasksCard(tasks: store.snapshot.recentTasks.map { task in
+                    guard privacyMode && preferencesEnabled else { return task }
+                    return RecentTask(id: task.id, title: AnalyticsExport.privateChatName(task.id), time: task.time,
+                                      tokenText: task.tokenText, progress: task.progress)
+                }, language: store.language, tuning: tuning)
+                sourceWarnings([.threads])
             }
             if showAPICost {
                 APICostEstimateCard(
                     estimate: store.snapshot.apiCostEstimate,
                     language: store.language,
-                    tuning: tuning
+                    tuning: tuning,
+                    issueCount: store.costHealth.issues.count
                 )
+                sourceWarnings([.cost])
             }
-            FooterView(snapshot: store.snapshot, language: store.language)
         }
         .padding(.horizontal, 16)
         .padding(.top, 14)
         .padding(.bottom, 12)
+        }
+        .scrollIndicators(.hidden)
+        if let onOpenAnalytics {
+            Button(action: onOpenAnalytics) {
+                Label(store.language.text("Open Analytics", "打开用量分析"), systemImage: "chart.bar.xaxis")
+                    .frame(maxWidth: .infinity)
+            }.buttonStyle(.bordered).keyboardShortcut("a", modifiers: [.command, .shift])
+                .padding(.horizontal, 16).padding(.vertical, 6)
+        }
+        FooterView(snapshot: store.snapshot, language: store.language)
+            .padding(.horizontal, 16).padding(.bottom, 12).padding(.top, 8)
+      }
         .frame(width: UsagePanelMetrics.width, height: displayedHeight)
         .background {
             BalancedPanelTint(tuning: tuning)
@@ -97,7 +137,8 @@ public struct UsagePanelView: View {
         }
         .overlay(alignment: .topTrailing) {
             if isShowingSettings {
-                UsageSettingsCard(
+                ScrollView {
+                  UsageSettingsCard(
                     showUsageSummary: $storedShowUsageSummary,
                     showRecentTasks: $storedShowRecentTasks,
                     showAPICost: $storedShowAPICost,
@@ -106,8 +147,12 @@ public struct UsagePanelView: View {
                         set: { store.setLanguage($0) }
                     ),
                     tuning: tuning,
+                    quotaSelection: $store.selectedQuotaID,
+                    quotaOptions: store.snapshot.periods,
                     close: { isShowingSettings = false }
-                )
+                  ).padding(1)
+                }
+                .frame(width: 310, height: min(425, max(120, displayedHeight - 110)))
                 .padding(.top, 96)
                 .padding(.trailing, 16)
                 .transition(.move(edge: .top).combined(with: .opacity))
@@ -122,11 +167,19 @@ public struct UsagePanelView: View {
         .onChange(of: displayedHeight) { _, newHeight in
             onHeightChange?(newHeight)
         }
-        .task {
-            await store.refresh()
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(60))
-                await store.refresh()
+    }
+
+    private func sourceWarnings(_ sources: [UsageSource]) -> some View {
+        ForEach(sources, id: \.self) { source in
+            if let health = store.sourceHealth[source], health.state == .stale || health.state == .unavailable {
+                HStack {
+                    Label(source.title(store.language) + " · " + health.title(store.language), systemImage: "exclamationmark.circle")
+                    Spacer()
+                    if let last = health.lastSuccess { Text(last.formatted(date: .omitted, time: .shortened)) }
+                }
+                .font(UsageDesign.font(10, language: store.language))
+                .foregroundStyle(.orange)
+                .accessibilityElement(children: .combine)
             }
         }
     }
@@ -136,20 +189,16 @@ private struct APICostEstimateCard: View {
     let estimate: APICostEstimateSnapshot?
     let language: AppLanguage
     let tuning: GlassTuning
+    var issueCount: Int = 0
 
-    private var sevenDayValue: String {
-        guard let estimate else { return "—" }
-        return Self.currency(estimate.sevenDayUSD)
+    private var currentWeekValue: String {
+        guard let estimate, estimate.currentWeekHasPricedUsage else { return "—" }
+        return Self.currency(estimate.currentWeekUSD)
     }
 
     private var lifetimeValue: String {
-        guard let value = estimate?.lifetimeUSD else { return "—" }
-        return Self.currency(value)
-    }
-
-    private var modelText: String {
-        guard let names = estimate?.modelNames, !names.isEmpty else { return language.noPricedModel }
-        return names.joined(separator: " · ")
+        guard let estimate, estimate.hasPricedUsage else { return "—" }
+        return Self.currency(estimate.lifetimeUSD)
     }
 
     var body: some View {
@@ -166,13 +215,14 @@ private struct APICostEstimateCard: View {
             }
 
             HStack(alignment: .firstTextBaseline) {
-                Text(sevenDayValue)
+                Text(currentWeekValue)
                     .font(UsageDesign.font(25, weight: .bold, language: language))
                     .foregroundStyle(UsageDesign.blue)
                     .monospacedDigit()
-                Text(language.metricSevenDays)
+                Text(language.metricCurrentWeek)
                     .font(UsageDesign.font(11.5, weight: .medium, language: language))
                     .foregroundStyle(.secondary)
+                    .help(language.currentWeekCostHint)
 
                 Spacer()
 
@@ -190,20 +240,21 @@ private struct APICostEstimateCard: View {
                 .opacity(0.32)
 
             HStack(spacing: 6) {
-                Image(systemName: "cpu")
+                Image(systemName: "calendar")
                     .font(.system(size: 11, weight: .medium))
-                Text(modelText)
+                Text(language.currentWeekStart)
                     .lineLimit(1)
+                    .help(language.currentWeekCostHint)
                 Spacer(minLength: 8)
-                Text(language.pricedCoverage(estimate?.coveragePercent ?? 0))
+                Text(estimate.map { language.pricedCoverage($0.coveragePercent) } ?? "—")
                     .monospacedDigit()
             }
             .font(UsageDesign.font(10.5, weight: .medium, language: language))
             .foregroundStyle(.secondary)
 
-            Text(language.costDisclaimer)
+            Text(issueCount > 0 ? language.text("\(issueCount) data issues · See Data Health", "\(issueCount) 项数据问题 · 请查看数据状态") : language.costDisclaimer)
                 .font(UsageDesign.font(9.5, language: language))
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(issueCount > 0 ? Color.orange : Color.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .lineLimit(2)
         }
@@ -227,6 +278,7 @@ private struct HeaderView: View {
     @ObservedObject var store: UsageStore
     let tuning: GlassTuning
     @Binding var isShowingSettings: Bool
+    let onRefresh: (() -> Void)?
 
     var body: some View {
         HStack(spacing: 12) {
@@ -244,15 +296,18 @@ private struct HeaderView: View {
                     Text(store.language.appTitle)
                         .font(UsageDesign.font(20, weight: .bold, language: store.language))
                         .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                        .layoutPriority(1)
                     Text(store.snapshot.planLabel)
                         .font(UsageDesign.font(11, weight: .bold, language: store.language))
                         .tracking(1.0)
                         .foregroundStyle(.secondary)
+                        .fixedSize()
                 }
 
                 HStack(spacing: 6) {
                     Circle()
-                        .fill(store.lastError == nil ? UsageDesign.green : Color.orange)
+                        .fill(store.hasCurrentQuota ? UsageDesign.green : Color.orange)
                         .frame(width: 8, height: 8)
                     Text(store.statusText)
                         .font(UsageDesign.font(13, language: store.language))
@@ -266,7 +321,11 @@ private struct HeaderView: View {
 
             HStack(spacing: 4) {
                 Button {
-                    Task { await store.refresh() }
+                    if let onRefresh {
+                        onRefresh()
+                    } else {
+                        Task { await store.refresh() }
+                    }
                 } label: {
                     ZStack {
                         Circle()
@@ -317,6 +376,10 @@ private struct UsageSummaryCard: View {
     var body: some View {
         VStack(spacing: 0) {
             VStack(spacing: 0) {
+                if snapshot.periods.isEmpty {
+                    Label(language.text("Quota data unavailable", "暂无额度数据"), systemImage: "questionmark.circle")
+                        .font(UsageDesign.font(14, language: language)).foregroundStyle(.secondary).padding(22)
+                }
                 ForEach(Array(snapshot.periods.enumerated()), id: \.element.id) { index, period in
                     QuotaRow(period: period, language: language)
                     if index < snapshot.periods.count - 1 {
@@ -410,6 +473,11 @@ private struct RecentTasksCard: View {
             .padding(.top, 13)
             .padding(.bottom, 9)
 
+            if tasks.isEmpty {
+                Text(language.text("No chat data returned", "暂无聊天数据"))
+                    .font(UsageDesign.font(12, language: language)).foregroundStyle(.secondary).padding(14)
+            }
+
             ForEach(Array(tasks.enumerated()), id: \.element.id) { index, task in
                 RecentTaskRow(task: task, language: language)
                 if index < tasks.count - 1 {
@@ -468,13 +536,14 @@ private struct FooterView: View {
     let language: AppLanguage
 
     private var updatedTime: String {
-        let components = Calendar.current.dateComponents([.hour, .minute], from: snapshot.updatedAt)
+        guard let date = snapshot.updatedAt else { return "—" }
+        let components = Calendar.current.dateComponents([.hour, .minute], from: date)
         return String(format: "%02d:%02d", components.hour ?? 0, components.minute ?? 0)
     }
 
     var body: some View {
         HStack {
-            Label(language.availableResets(snapshot.availableResets), systemImage: "clock.arrow.circlepath")
+            Label(snapshot.availableResets.map(language.availableResets) ?? (language == .english ? "Resets unknown" : "重置次数未知"), systemImage: "clock.arrow.circlepath")
             Spacer()
             Text(language.updatedAt(updatedTime))
         }

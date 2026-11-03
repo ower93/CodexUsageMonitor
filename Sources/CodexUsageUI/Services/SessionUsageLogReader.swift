@@ -6,6 +6,7 @@ struct SessionFileDescriptor: Sendable {
     let url: URL
     let parentSessionID: String?
     let forkedAt: Date?
+    let metadataResolved: Bool
 
     var isForked: Bool {
         parentSessionID != nil && forkedAt != nil
@@ -16,11 +17,29 @@ struct SessionUsageSlice: Sendable {
     let usageDay: String
     let model: String
     let counts: TokenCounts
+    var accountingNote: String? = nil
 }
 
 struct SessionUsageHistory: Sendable {
     let summary: SessionTokenSummary
     let slices: [SessionUsageSlice]
+}
+
+struct SessionLogCursorState: Sendable {
+    let completeLineCursor: UInt64
+    let currentModel: String
+    let summary: SessionTokenSummary?
+    var issueCodes: [String] = []
+}
+
+struct SessionHistoryRead: Sendable {
+    let history: SessionUsageHistory
+    let state: SessionLogCursorState
+}
+
+struct SessionIncrementalRead: Sendable {
+    let slices: [SessionUsageSlice]
+    let state: SessionLogCursorState
 }
 
 enum SessionUsageLogReader {
@@ -34,7 +53,8 @@ enum SessionUsageLogReader {
             sessionID: sessionID(from: url.lastPathComponent),
             url: url,
             parentSessionID: nil,
-            forkedAt: nil
+            forkedAt: nil,
+            metadataResolved: false
         )
 
         try? JSONLineFile.forEachLine(at: url) { line in
@@ -55,7 +75,8 @@ enum SessionUsageLogReader {
                 sessionID: sessionID,
                 url: url,
                 parentSessionID: parentID,
-                forkedAt: parentID == nil ? nil : timestamp
+                forkedAt: parentID == nil ? nil : timestamp,
+                metadataResolved: true
             )
             return false
         }
@@ -66,10 +87,7 @@ enum SessionUsageLogReader {
         for descriptors: [SessionFileDescriptor],
         childSessionIDs: Set<String>? = nil
     ) -> [String: TokenCounts] {
-        var filesByID: [String: URL] = [:]
-        for descriptor in descriptors where filesByID[descriptor.sessionID] == nil {
-            filesByID[descriptor.sessionID] = descriptor.url
-        }
+        let filesByID = Dictionary(grouping: descriptors, by: \.sessionID)
         var requestsByParent: [String: [BaselineRequest]] = [:]
 
         for descriptor in descriptors {
@@ -86,51 +104,97 @@ enum SessionUsageLogReader {
             ))
         }
 
-        var result: [String: TokenCounts] = [:]
+        var snapshots: [String: BaselineSnapshot] = [:]
         for (parentID, requests) in requestsByParent {
-            guard let parentURL = filesByID[parentID] else { continue }
+            guard let parentFiles = filesByID[parentID] else { continue }
             let sortedRequests = requests.sorted { $0.forkedAt < $1.forkedAt }
-            resolveBaselines(
-                requests: sortedRequests,
-                parentURL: parentURL,
-                into: &result
-            )
+            // A copied continuation can retain the same session ID. Never
+            // choose one at random: merge the latest pre-fork evidence from
+            // every available continuation, without adding their counters.
+            for parent in parentFiles.sorted(by: { $0.url.path < $1.url.path }) {
+                resolveBaselines(requests: sortedRequests, parentURL: parent.url, into: &snapshots)
+            }
         }
+        let parentCounts = snapshots.compactMapValues { $0.ambiguous ? nil : $0.counts }
+        var candidates: [String: Set<TokenCounts>] = [:]
 
-        // Older Codex builds sometimes wrote forked sessions with the copied
-        // token history embedded in the child log while the parent log had no
-        // token_count events. In that format, the last child event at or before
-        // the fork timestamp is the inherited baseline.
+        // Child counters have existed in two formats: copied cumulative parent
+        // history, and independent counters starting near zero. A parent ID is
+        // a relationship, not proof that its counters were copied. Prefer an
+        // embedded pre-fork event, otherwise compare the child's first event
+        // with the parent snapshot. Ambiguous/missing evidence remains unknown.
         for descriptor in descriptors {
             if let childSessionIDs,
                !childSessionIDs.contains(descriptor.sessionID) {
                 continue
             }
-            guard result[descriptor.sessionID] == nil,
-                  descriptor.parentSessionID != nil,
-                  let forkedAt = descriptor.forkedAt,
-                  let baseline = localInheritedBaseline(
-                      childURL: descriptor.url,
-                      forkedAt: forkedAt
-                  )
-            else { continue }
-            result[descriptor.sessionID] = baseline
+            guard descriptor.parentSessionID != nil else { continue }
+            if let baseline = resolvedChildBaseline(for: descriptor, parentBaseline: parentCounts[descriptor.sessionID]) {
+                candidates[descriptor.sessionID, default: []].insert(baseline)
+            }
         }
-        return result
+        // Conflicting continuation evidence is unknown, not whichever file
+        // happened to be enumerated last.
+        return candidates.compactMapValues { $0.count == 1 ? $0.first : nil }
+    }
+
+    static func resolvedChildBaseline(
+        for descriptor: SessionFileDescriptor,
+        parentBaseline: TokenCounts?
+    ) -> TokenCounts? {
+        guard let forkedAt = descriptor.forkedAt else { return nil }
+        var embedded: TokenCounts?
+        var firstOwnEvent: TokenCounts?
+        do {
+            try JSONLineFile.forEachLine(at: descriptor.url) { line in
+                guard contains(line, tokenCountNeedle),
+                      let event = tokenCountEvent(line, includeDate: true), let date = event.date
+                else { return true }
+                if date <= forkedAt {
+                    embedded = event.counts
+                    return true
+                }
+                firstOwnEvent = event.counts
+                return false
+            }
+        } catch { return nil }
+        if let embedded { return embedded }
+        guard let parentBaseline, let firstOwnEvent else { return nil }
+        if firstOwnEvent.totalTokens < parentBaseline.totalTokens,
+           firstOwnEvent.inputTokens < parentBaseline.inputTokens {
+            // No copied token events, and counters mathematically cannot
+            // contain the parent's cumulative total: independent child format.
+            return .zero
+        }
+        if firstOwnEvent.subtracting(parentBaseline) != nil { return parentBaseline }
+        return nil
     }
 
     static func history(
         for descriptor: SessionFileDescriptor,
         inheritedBaseline: TokenCounts
     ) -> SessionUsageHistory? {
+        historyAndState(
+            for: descriptor,
+            inheritedBaseline: inheritedBaseline
+        )?.history
+    }
+
+    static func historyAndState(
+        for descriptor: SessionFileDescriptor,
+        inheritedBaseline: TokenCounts
+    ) -> SessionHistoryRead? {
         var currentModel = "unknown"
         var previousBillable = TokenCounts.zero
         var latestBillable = TokenCounts.zero
+        var latestRawSummary: SessionTokenSummary?
         var sawComparableUsage = false
+        var issues = Set<String>()
         var slicesByKey: [SliceKey: TokenCounts] = [:]
+        let cursor: UInt64
 
         do {
-            try JSONLineFile.forEachLine(at: descriptor.url) { line in
+            cursor = try JSONLineFile.forEachCompleteLine(at: descriptor.url) { line in
                 if contains(line, turnContextNeedle),
                    let object = jsonObject(line),
                    object["type"] as? String == "turn_context",
@@ -140,21 +204,37 @@ enum SessionUsageLogReader {
                     return true
                 }
 
-                guard contains(line, eventMessageNeedle),
-                      contains(line, tokenCountNeedle),
-                      let event = tokenCountEvent(line),
-                      let currentBillable = event.counts.subtracting(inheritedBaseline)
-                else { return true }
+                guard contains(line, eventMessageNeedle), contains(line, tokenCountNeedle) else { return true }
+                guard let event = tokenCountEvent(line) else {
+                    // info:null quota-only events are valid, not failed usage.
+                    if let object = jsonObject(line), let payload = object["payload"] as? [String: Any],
+                       let info = payload["info"] as? [String: Any], info["total_token_usage"] != nil {
+                        issues.insert("malformed-token-event")
+                    }
+                    return true
+                }
 
+                guard let currentBillable = event.counts.subtracting(inheritedBaseline) else {
+                    return true
+                }
                 sawComparableUsage = true
                 guard let delta = currentBillable.delta(since: previousBillable) else {
+                    issues.insert("nonmonotonic-counter-event")
                     return true
                 }
                 previousBillable = currentBillable
                 latestBillable = currentBillable
-                guard delta.totalTokens > 0 else { return true }
+                latestRawSummary = SessionTokenSummary(
+                    model: currentModel,
+                    inputTokens: event.counts.inputTokens,
+                    cachedInputTokens: event.counts.cachedInputTokens,
+                    outputTokens: event.counts.outputTokens,
+                    totalTokens: event.counts.totalTokens
+                )
+                guard delta.totalTokens > 0 || delta.cachedInputTokens > 0 else { return true }
 
-                let key = SliceKey(usageDay: event.usageDay, model: currentModel)
+                let key = SliceKey(usageDay: event.usageDay, model: currentModel,
+                                   accountingNote: delta.accountingIssue)
                 if slicesByKey[key] == nil {
                     slicesByKey[key] = .zero
                 }
@@ -167,26 +247,277 @@ enum SessionUsageLogReader {
 
         guard sawComparableUsage else { return nil }
         let summary = SessionTokenSummary(
-            model: currentModel,
+            model: latestRawSummary?.model ?? currentModel,
             inputTokens: latestBillable.inputTokens,
             cachedInputTokens: latestBillable.cachedInputTokens,
             outputTokens: latestBillable.outputTokens,
             totalTokens: latestBillable.totalTokens
         )
         let slices = slicesByKey.map {
-            SessionUsageSlice(usageDay: $0.key.usageDay, model: $0.key.model, counts: $0.value)
+            SessionUsageSlice(usageDay: $0.key.usageDay, model: $0.key.model, counts: $0.value,
+                              accountingNote: $0.key.accountingNote)
         }
-        return SessionUsageHistory(summary: summary, slices: slices)
+        return SessionHistoryRead(
+            history: SessionUsageHistory(summary: summary, slices: slices),
+            state: SessionLogCursorState(
+                completeLineCursor: cursor,
+                currentModel: currentModel,
+                summary: latestRawSummary,
+                issueCodes: issues.sorted()
+            )
+        )
+    }
+
+    static func warmState(
+        for descriptor: SessionFileDescriptor,
+        fileSize: UInt64
+    ) -> SessionLogCursorState? {
+        for byteLimit in [131_072, 1_048_576] {
+            if let tail = tailState(
+                for: descriptor.url,
+                fileSize: fileSize,
+                byteLimit: byteLimit
+            ), tail.summary?.model != "unknown" {
+                return tail
+            }
+        }
+        return fullState(for: descriptor.url)
+    }
+
+    static func incrementalRead(
+        for descriptor: SessionFileDescriptor,
+        previous: SessionLogCursorState
+    ) -> SessionIncrementalRead? {
+        var currentModel = previous.currentModel
+        var latestSummary = previous.summary
+        var highWatermark = previous.summary.map(TokenCounts.init(summary:))
+        var reachedCheckpoint = previous.completeLineCursor > 0
+        var issues = Set(previous.issueCodes)
+        var slicesByKey: [SliceKey: TokenCounts] = [:]
+        let cursor: UInt64
+
+        do {
+            cursor = try JSONLineFile.forEachCompleteLine(
+                at: descriptor.url,
+                startingAt: previous.completeLineCursor
+            ) { line in
+                if contains(line, turnContextNeedle),
+                   let object = jsonObject(line),
+                   object["type"] as? String == "turn_context",
+                   let payload = object["payload"] as? [String: Any],
+                   let model = payload["model"] as? String {
+                    currentModel = model
+                    return true
+                }
+
+                guard contains(line, eventMessageNeedle),
+                      contains(line, tokenCountNeedle),
+                      let event = tokenCountEvent(line)
+                else { return true }
+
+                guard let prior = highWatermark else {
+                    highWatermark = event.counts
+                    latestSummary = summary(model: currentModel, counts: event.counts)
+                    return true
+                }
+                guard let delta = event.counts.delta(since: prior) else {
+                    // Keep the durable high-water mark across a temporary
+                    // truncation or counter reset. Tokens are only resumed once
+                    // the cumulative log catches up with the checkpoint.
+                    if reachedCheckpoint { issues.insert("nonmonotonic-counter-event") }
+                    return true
+                }
+
+                reachedCheckpoint = true
+                highWatermark = event.counts
+                latestSummary = SessionTokenSummary(
+                    model: currentModel,
+                    inputTokens: event.counts.inputTokens,
+                    cachedInputTokens: event.counts.cachedInputTokens,
+                    outputTokens: event.counts.outputTokens,
+                    totalTokens: event.counts.totalTokens
+                )
+                guard delta.totalTokens > 0 || delta.cachedInputTokens > 0 else { return true }
+                let key = SliceKey(usageDay: event.usageDay, model: currentModel,
+                                   accountingNote: delta.accountingIssue)
+                if slicesByKey[key] == nil {
+                    slicesByKey[key] = .zero
+                }
+                slicesByKey[key]?.add(delta)
+                return true
+            }
+        } catch {
+            return nil
+        }
+
+        let slices = slicesByKey.map {
+            SessionUsageSlice(
+                usageDay: $0.key.usageDay,
+                model: $0.key.model,
+                counts: $0.value,
+                accountingNote: $0.key.accountingNote
+            )
+        }
+        return SessionIncrementalRead(
+            slices: slices,
+            state: SessionLogCursorState(
+                completeLineCursor: cursor,
+                currentModel: currentModel,
+                summary: latestSummary,
+                issueCodes: issues.sorted()
+            )
+        )
+    }
+
+    private static func summary(
+        model: String,
+        counts: TokenCounts
+    ) -> SessionTokenSummary {
+        SessionTokenSummary(
+            model: model,
+            inputTokens: counts.inputTokens,
+            cachedInputTokens: counts.cachedInputTokens,
+            outputTokens: counts.outputTokens,
+            totalTokens: counts.totalTokens
+        )
+    }
+
+    private static func fullState(for url: URL) -> SessionLogCursorState? {
+        var currentModel = "unknown"
+        var latestSummary: SessionTokenSummary?
+        let cursor: UInt64
+
+        do {
+            cursor = try JSONLineFile.forEachCompleteLine(at: url) { line in
+                if contains(line, turnContextNeedle),
+                   let object = jsonObject(line),
+                   object["type"] as? String == "turn_context",
+                   let payload = object["payload"] as? [String: Any],
+                   let model = payload["model"] as? String {
+                    currentModel = model
+                    return true
+                }
+
+                guard contains(line, eventMessageNeedle),
+                      contains(line, tokenCountNeedle),
+                      let event = tokenCountEvent(line)
+                else { return true }
+                latestSummary = SessionTokenSummary(
+                    model: currentModel,
+                    inputTokens: event.counts.inputTokens,
+                    cachedInputTokens: event.counts.cachedInputTokens,
+                    outputTokens: event.counts.outputTokens,
+                    totalTokens: event.counts.totalTokens
+                )
+                return true
+            }
+        } catch {
+            return nil
+        }
+
+        return SessionLogCursorState(
+            completeLineCursor: cursor,
+            currentModel: currentModel,
+            summary: latestSummary
+        )
+    }
+
+    private static func tailState(
+        for url: URL,
+        fileSize: UInt64,
+        byteLimit: Int
+    ) -> SessionLogCursorState? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+
+        let readSize = min(fileSize, UInt64(byteLimit))
+        let offset = fileSize - readSize
+        do {
+            try handle.seek(toOffset: offset)
+            let data = try handle.read(upToCount: Int(readSize)) ?? Data()
+            guard !data.isEmpty || fileSize == 0 else { return nil }
+
+            var lowerBound = data.startIndex
+            if offset > 0 {
+                guard let firstNewline = data[lowerBound...].firstIndex(of: 0x0A) else {
+                    return nil
+                }
+                lowerBound = data.index(after: firstNewline)
+            }
+            let upperBound: Data.Index
+            if data.last == 0x0A {
+                upperBound = data.endIndex
+            } else if let lastNewline = data.lastIndex(of: 0x0A) {
+                upperBound = data.index(after: lastNewline)
+            } else {
+                upperBound = lowerBound
+            }
+
+            var currentModel = "unknown"
+            var latestSummary: SessionTokenSummary?
+            if lowerBound < upperBound {
+                for rawLine in data[lowerBound..<upperBound].split(separator: 0x0A) {
+                    autoreleasepool {
+                        guard let object = try? JSONSerialization.jsonObject(
+                            with: Data(rawLine)
+                        ) as? [String: Any],
+                        let type = object["type"] as? String,
+                        let payload = object["payload"] as? [String: Any]
+                        else { return }
+
+                        if type == "turn_context",
+                           let model = payload["model"] as? String {
+                            currentModel = model
+                            return
+                        }
+                        guard type == "event_msg",
+                              payload["type"] as? String == "token_count",
+                              let info = payload["info"] as? [String: Any],
+                              let usage = info["total_token_usage"] as? [String: Any]
+                        else { return }
+                        let input = int64(usage["input_tokens"]) ?? 0
+                        let cached = int64(usage["cached_input_tokens"]) ?? 0
+                        let output = int64(usage["output_tokens"]) ?? 0
+                        let total = int64(usage["total_tokens"]) ?? (input + output)
+                        latestSummary = SessionTokenSummary(
+                            model: currentModel,
+                            inputTokens: input,
+                            cachedInputTokens: cached,
+                            outputTokens: output,
+                            totalTokens: total
+                        )
+                    }
+                }
+            }
+
+            let incompleteBytes = data.distance(from: upperBound, to: data.endIndex)
+            return SessionLogCursorState(
+                completeLineCursor: fileSize - UInt64(incompleteBytes),
+                currentModel: currentModel,
+                summary: latestSummary
+            )
+        } catch {
+            return nil
+        }
     }
 
     private static func resolveBaselines(
         requests: [BaselineRequest],
         parentURL: URL,
-        into result: inout [String: TokenCounts]
+        into result: inout [String: BaselineSnapshot]
     ) {
         guard !requests.isEmpty else { return }
         var requestIndex = 0
-        var latestCounts: TokenCounts?
+        var latest: BaselineSnapshot?
+
+        func record(_ child: String, _ candidate: BaselineSnapshot) {
+            guard let previous = result[child] else { result[child] = candidate; return }
+            if candidate.date > previous.date {
+                result[child] = candidate
+            } else if candidate.date == previous.date, candidate.counts != previous.counts {
+                result[child]?.ambiguous = true
+            }
+        }
 
         do {
             try JSONLineFile.forEachLine(at: parentURL) { line in
@@ -198,12 +529,12 @@ enum SessionUsageLogReader {
 
                 while requestIndex < requests.count,
                       requests[requestIndex].forkedAt < eventDate {
-                    if let latestCounts {
-                        result[requests[requestIndex].childSessionID] = latestCounts
+                    if let latest {
+                        record(requests[requestIndex].childSessionID, latest)
                     }
                     requestIndex += 1
                 }
-                latestCounts = event.counts
+                latest = BaselineSnapshot(date: eventDate, counts: event.counts)
                 return requestIndex < requests.count
             }
         } catch {
@@ -211,8 +542,8 @@ enum SessionUsageLogReader {
         }
 
         while requestIndex < requests.count {
-            if let latestCounts {
-                result[requests[requestIndex].childSessionID] = latestCounts
+            if let latest {
+                record(requests[requestIndex].childSessionID, latest)
             }
             requestIndex += 1
         }
@@ -313,6 +644,12 @@ private struct BaselineRequest {
     let forkedAt: Date
 }
 
+private struct BaselineSnapshot {
+    let date: Date
+    let counts: TokenCounts
+    var ambiguous = false
+}
+
 private struct TokenCountEvent {
     let usageDay: String
     let date: Date?
@@ -322,6 +659,7 @@ private struct TokenCountEvent {
 private struct SliceKey: Hashable {
     let usageDay: String
     let model: String
+    let accountingNote: String?
 }
 
 private enum SessionTimestampParser {
@@ -339,32 +677,104 @@ private enum SessionTimestampParser {
     }
 }
 
-private enum JSONLineFile {
+enum JSONLineFile {
     enum ReadError: Error {
         case cannotOpen
+        case cannotSeek
+        case cannotRead
     }
 
     static func forEachLine(
         at url: URL,
         _ body: (UnsafeBufferPointer<CChar>) -> Bool
     ) throws {
-        guard let file = fopen(url.path, "r") else { throw ReadError.cannotOpen }
-        defer { fclose(file) }
+        _ = try forEachCompleteLine(at: url, body)
+    }
 
-        var pointer: UnsafeMutablePointer<CChar>?
-        var capacity = 0
-        defer { free(pointer) }
-
-        while true {
-            let length = getline(&pointer, &capacity, file)
-            guard length >= 0 else { break }
-            guard let pointer else { continue }
-            var contentLength = Int(length)
-            if contentLength > 0, pointer[contentLength - 1] == 0x0A {
-                contentLength -= 1
-            }
-            let buffer = UnsafeBufferPointer(start: pointer, count: contentLength)
-            if !body(buffer) { break }
+    @discardableResult
+    static func forEachCompleteLine(
+        at url: URL,
+        startingAt offset: UInt64 = 0,
+        filterUsageLines: Bool = true,
+        _ body: (UnsafeBufferPointer<CChar>) -> Bool
+    ) throws -> UInt64 {
+        let file = open(url.path, O_RDONLY | O_CLOEXEC)
+        guard file >= 0 else { throw ReadError.cannotOpen }
+        defer { close(file) }
+        guard offset <= UInt64(Int64.max),
+              lseek(file, off_t(offset), SEEK_SET) >= 0
+        else {
+            throw ReadError.cannotSeek
         }
+        // Fixed-size sequential reads avoid getline's small reads and growing
+        // allocation for giant tool responses. Irrelevant long lines are
+        // discarded directly from the read buffer; mmap is deliberately avoided
+        // because a live log may be truncated while it is being scanned.
+        let capacity = 256 * 1024
+        let buffer = UnsafeMutablePointer<CChar>.allocate(capacity: capacity + 1)
+        defer { buffer.deallocate() }
+        var pending = Data()
+        var lineBytes: UInt64 = 0
+        var skipping = false
+        var committedOffset = offset
+        while true {
+            try Task.checkCancellation()
+            let readCount = Darwin.read(file, buffer, capacity)
+            if readCount < 0 {
+                if errno == EINTR { continue }
+                throw ReadError.cannotRead
+            }
+            guard readCount > 0 else { break }
+            var position = 0
+            while position < readCount {
+                try Task.checkCancellation()
+                let start = buffer.advanced(by: position)
+                let newline = memchr(start, 0x0A, readCount - position)
+                    .map { $0.assumingMemoryBound(to: CChar.self) }
+                let length = newline.map { start.distance(to: $0) } ?? (readCount - position)
+                let complete = newline != nil
+                var shouldContinue = true
+                if lineBytes == 0, complete {
+                    // The common path needs neither a line copy nor a Data
+                    // allocation. The callback borrows a null-terminated slice.
+                    start[length] = 0
+                    let line = UnsafeBufferPointer(start: start, count: length)
+                    if !filterUsageLines || SessionLogLineFilter.mayContainUsage(line) {
+                        shouldContinue = autoreleasepool { body(line) }
+                    }
+                } else if !skipping {
+                    let piece = UnsafeBufferPointer(start: start, count: length)
+                    if pending.isEmpty, filterUsageLines, !SessionLogLineFilter.mayContainUsage(piece) {
+                        skipping = true
+                    } else {
+                        pending.append(UnsafeRawPointer(start).assumingMemoryBound(to: UInt8.self), count: length)
+                        if filterUsageLines {
+                            skipping = pending.withUnsafeBytes { raw in
+                                !SessionLogLineFilter.mayContainUsage(raw.bindMemory(to: CChar.self))
+                            }
+                            if skipping { pending.removeAll(keepingCapacity: false) }
+                        }
+                        if complete, !skipping {
+                            pending.append(0)
+                            shouldContinue = pending.withUnsafeBytes { raw in
+                                autoreleasepool { body(UnsafeBufferPointer(start: raw.bindMemory(to: CChar.self).baseAddress,
+                                                                          count: pending.count - 1)) }
+                            }
+                        }
+                    }
+                }
+                lineBytes += UInt64(length)
+                position += length + (complete ? 1 : 0)
+                if complete {
+                    committedOffset += lineBytes + 1
+                    lineBytes = 0
+                    skipping = false
+                    pending.removeAll(keepingCapacity: pending.count <= capacity)
+                    if !shouldContinue { return committedOffset }
+                }
+            }
+        }
+        // No newline means no commit, even if the unfinished line was filtered.
+        return committedOffset
     }
 }

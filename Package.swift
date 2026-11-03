@@ -11,15 +11,21 @@ let package = Package(
         .executable(name: "CodexUsageMonitor", targets: ["CodexUsageMonitor"]),
         .executable(name: "PreviewRendererTool", targets: ["PreviewRendererTool"])
     ],
+    dependencies: [
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.0")
+    ],
     targets: [
         .target(
             name: "CodexUsageUI",
-            path: "Sources/CodexUsageUI"
+            path: "Sources/CodexUsageUI",
+            resources: [.process("Resources")],
+            linkerSettings: [.linkedLibrary("sqlite3")]
         ),
         .executableTarget(
             name: "CodexUsageMonitor",
-            dependencies: ["CodexUsageUI"],
-            path: "Sources/CodexUsageMonitor"
+            dependencies: ["CodexUsageUI", .product(name: "Sparkle", package: "Sparkle")],
+            path: "Sources/CodexUsageMonitor",
+            linkerSettings: [.unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])]
         ),
         .executableTarget(
             name: "PreviewRendererTool",

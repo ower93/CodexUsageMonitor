@@ -150,7 +150,7 @@ public enum AppLanguage: String, CaseIterable, Identifiable, Sendable {
     var metricCurrent: String {
         switch self {
         case .simplifiedChinese: "最新线程"
-        case .english: "Latest Thread"
+        case .english: "Latest Chat"
         }
     }
 
@@ -163,8 +163,29 @@ public enum AppLanguage: String, CaseIterable, Identifiable, Sendable {
 
     var metricLifetime: String {
         switch self {
-        case .simplifiedChinese: "累计"
-        case .english: "Lifetime"
+        case .simplifiedChinese: "账户累计"
+        case .english: "Account Total"
+        }
+    }
+
+    var metricCurrentWeek: String {
+        switch self {
+        case .simplifiedChinese: "本周"
+        case .english: "This Week"
+        }
+    }
+
+    var currentWeekStart: String {
+        switch self {
+        case .simplifiedChinese: "周一 00:00 起"
+        case .english: "Since Mon 00:00"
+        }
+    }
+
+    var currentWeekCostHint: String {
+        switch self {
+        case .simplifiedChinese: "按本机时区，从本周一 00:00 起累计的估算费用"
+        case .english: "Estimated cost since Monday 00:00 in your Mac's local time zone"
         }
     }
 
@@ -212,8 +233,8 @@ public enum AppLanguage: String, CaseIterable, Identifiable, Sendable {
 
     var lifetimeCost: String {
         switch self {
-        case .simplifiedChinese: "生涯总费用"
-        case .english: "Lifetime Cost"
+        case .simplifiedChinese: "本机生涯估算"
+        case .english: "Local Lifetime"
         }
     }
 
@@ -233,8 +254,8 @@ public enum AppLanguage: String, CaseIterable, Identifiable, Sendable {
 
     var costDisclaimer: String {
         switch self {
-        case .simplifiedChinese: "按输入 / 缓存输入 / 输出 token 分别估算，不含税费与长上下文加价"
-        case .english: "Token types priced separately; excludes tax and surcharges."
+        case .simplifiedChinese: "API 等值估算，非实际账单；不含缓存写入溢价、其他加价与税费"
+        case .english: "API-equivalent, not a bill; excludes cache-write premiums, surcharges and tax."
         }
     }
 
@@ -261,8 +282,8 @@ public enum AppLanguage: String, CaseIterable, Identifiable, Sendable {
 
     func updatedAt(_ time: String) -> String {
         switch self {
-        case .simplifiedChinese: "更新于 \(time)"
-        case .english: "Updated \(time)"
+        case .simplifiedChinese: "额度更新 \(time)"
+        case .english: "Quota updated \(time)"
         }
     }
 

@@ -14,7 +14,24 @@ struct PreviewRendererTool {
             ?? "work/codex-usage-panel-preview.png"
         let showsSettings = arguments.contains("--settings")
         let language: AppLanguage = arguments.contains("--english") ? .english : .simplifiedChinese
-        let store = UsageStore(autoRefresh: false, previewOnly: true, language: language)
+        let dark = arguments.contains("--dark")
+        NSApp.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+        if arguments.contains("--analytics") || arguments.contains("--share-card") || arguments.contains("--health") {
+            let data: Data
+            if arguments.contains("--health") {
+                data = try await UsagePreviewExport.health(language: language, dark: dark)
+            } else if arguments.contains("--analytics") {
+                data = try await UsagePreviewExport.analytics(language: language, dark: dark)
+            } else {
+                data = try UsagePreviewExport.shareCard(language: language)
+            }
+            try data.write(to: URL(fileURLWithPath: outputPath), options: .atomic)
+            return
+        }
+        let store = UsageStore(autoRefresh: false, previewOnly: !arguments.contains("--empty"), language: language)
+        let height: CGFloat = arguments.contains("--compact") ? 520
+            : (arguments.contains("--full") ? 900 : UsagePanelMetrics.height)
+        store.panelMaximumHeight = height
         let tuning = GlassTuning.final
         let content = ZStack {
             LinearGradient(
@@ -29,22 +46,15 @@ struct PreviewRendererTool {
                 store: store,
                 tuning: tuning,
                 preferencesEnabled: false,
-                settingsInitiallyPresented: showsSettings
+                settingsInitiallyPresented: showsSettings,
+                onOpenAnalytics: {},
+                previewHeight: height
             )
         }
-        .frame(width: UsagePanelMetrics.width, height: UsagePanelMetrics.height)
-        let renderer = ImageRenderer(content: content)
-        renderer.scale = 2
-
-        guard
-            let image = renderer.nsImage,
-            let tiff = image.tiffRepresentation,
-            let bitmap = NSBitmapImageRep(data: tiff),
-            let png = bitmap.representation(using: .png, properties: [:])
-        else {
-            throw PreviewError.renderFailed
-        }
-
+        .environment(\.colorScheme, dark ? .dark : .light)
+        .frame(width: UsagePanelMetrics.width, height: height)
+        let png = try await UsagePreviewExport.render(content,
+            size: NSSize(width: UsagePanelMetrics.width, height: height), dark: dark)
         try png.write(to: URL(fileURLWithPath: outputPath), options: .atomic)
     }
 }

@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "revision": 20261006,
+  "verifiedAt": "2026-10-06",
+  "sourceURL": "https://developers.openai.com/api/docs/pricing",
+  "basis": "Standard API short-context token equivalent; excludes cache-write premiums, service-tier surcharges, tools and tax.",
+  "entries": [
+    {"modelID":"gpt-6.1-sol","price":{"version":"2026-10-06-standard","displayName":"GPT-6.1 Sol","inputPerMillion":2,"cachedInputPerMillion":0.1,"outputPerMillion":10}},
+    {"modelID":"gpt-6-sol","price":{"version":"2026-10-06-standard","displayName":"GPT-6 Sol","inputPerMillion":2,"cachedInputPerMillion":0.2,"outputPerMillion":10}},
+    {"modelID":"gpt-6-luna","price":{"version":"2026-10-06-standard","displayName":"GPT-6 Luna","inputPerMillion":0.1,"cachedInputPerMillion":0.01,"outputPerMillion":0.5}},
+    {"modelID":"gpt-6-astra","price":{"version":"2026-09-07-standard","displayName":"GPT-6 Astra","inputPerMillion":10,"cachedInputPerMillion":1,"outputPerMillion":50}},
+    {"modelID":"gpt-5.6-sol","price":{"version":"2026-09-07-standard","displayName":"GPT-5.6 Sol","inputPerMillion":4,"cachedInputPerMillion":0.4,"outputPerMillion":20}},
+    {"modelID":"gpt-5.6-terra","price":{"version":"2026-09-07-standard","displayName":"GPT-5.6 Terra","inputPerMillion":2,"cachedInputPerMillion":0.2,"outputPerMillion":12}},
+    {"modelID":"gpt-5.6-luna","price":{"version":"2026-09-07-standard","displayName":"GPT-5.6 Luna","inputPerMillion":0.2,"cachedInputPerMillion":0.02,"outputPerMillion":1.2}},
+    {"modelID":"gpt-5.5","price":{"version":"2026-07-13-standard","displayName":"GPT-5.5","inputPerMillion":5,"cachedInputPerMillion":0.5,"outputPerMillion":30}},
+    {"modelID":"gpt-5.4","price":{"version":"2026-07-13-standard","displayName":"GPT-5.4","inputPerMillion":2.5,"cachedInputPerMillion":0.25,"outputPerMillion":15}}
+  ]
+}
